@@ -484,7 +484,6 @@ with tab_inversiones:
                 "Activo": st.column_config.TextColumn("Activo", disabled=True),
                 "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
                 "Acciones / Capital": st.column_config.NumberColumn("Acciones / Capital", format="%.4f"),
-                "Precio Compra (€>)", # Corregido abajo
                 "Precio Compra (€)": st.column_config.NumberColumn("Precio Compra (€)", format="%.2f €"),
                 "Precio Actual (€)": st.column_config.NumberColumn("Precio Actual (€)", format="%.2f €", disabled=True),
                 "Valor Actual (€)": st.column_config.NumberColumn("Valor Actual (€)", format="%.2f €", disabled=True),
@@ -532,15 +531,13 @@ with tab_ia:
                 
                 client = genai.Client(api_key=api_key)
                 
-                # PROMPT CORREGIDO PARA ENTENDER CAPITAL TOTAL E INVERSIÓN EN FONDOS
                 prompt_ia = f"""
                 Eres el motor experto financiero de una app. Analiza detalladamente la petición del usuario: '{instruccion}'.
                 
                 Clasifica correctamente cada elemento:
                 1. Si el usuario indica un FONDO INDEXADO o ACCIÓN mencionando un capital invertido (ej: "invertí 2000€") y un valor actual total (ej: "ahora tengo 2350€"):
                    - Calcula el valor total actual y divídelo entre el valor total invertido para saber la proporción o pon una cantidad equivalente de unidades/participaciones con su respectivo precio unitario equivalente.
-                   - O de forma más directa: Pon en "acciones" el importe total actual o el número de participaciones, y en "precio_compra" el precio medio por unidad/participación para que al multiplicarlo (acciones * precio_compra) refleje fielmente el dinero invertido total, y que el valor actual refleje los "ahora tengo X euros". 
-                   - Específicamente, pon en "acciones" el número de participaciones si lo hay, o pon como "acciones" el capital invertido total y "precio_compra": 1.0 si no se conoce el valor liquidativo exacto, calculando el beneficio mediante la diferencia. Mejor aún: calcula el precio de compra unitario estimado o establece "acciones" = capital_invertido y "precio_compra" = 1.0, pero ajustando para que el valor actual refleje el monto actual que dice el usuario.
+                   - Pon en "acciones" el importe total actual o el número de participaciones, y en "precio_compra" el precio medio por unidad/participación para que al multiplicarlo (acciones * precio_compra) refleje fielmente el dinero invertido total, y que el valor actual refleje los "ahora tengo X euros". 
                    - Asegúrate de poner tipo_activo: "Fondo Indexado" (o "Acción/ETF") y el ticker o ISIN si se menciona (o "FONDO_MANUAL").
                 2. Si es un depósito o cuenta remunerada con TAE, usa tipo_activo: "Cuenta Remunerada", capital en "acciones", precio_compra: 1.0, fecha_inicio y interes_tae.
                 
@@ -571,7 +568,7 @@ with tab_ia:
                 tiempo_limite = 30
                 inicio_proceso = time.time()
                 
-                with st.spinner("🤖 Procesando solicitud... Reintentando automáticamente conexión con la IA (hasta 30 segundos si hay alta congestión en los servidores)..."):
+                with st.spinner("🤖 Procesando solicitud... Reintentando automáticamente conexión con la IA..."):
                     while (time.time() - inicio_proceso) < tiempo_limite:
                         for mod in modelos_a_probar:
                             try:
@@ -590,7 +587,7 @@ with tab_ia:
                         time.sleep(3)
                 
                 if res is None:
-                    raise Exception(f"Los servidores continuaron saturados tras 30 segundos de reintentos. Detalle: {ultimo_error}")
+                    raise Exception(f"Los servidores continuaron saturados tras 30 segundos. Detalle: {ultimo_error}")
                 
                 texto_limpio = res.text.replace("```json", "").replace("```", "").strip()
                 data = json.loads(texto_limpio)
@@ -598,8 +595,6 @@ with tab_ia:
                 if data.get("accion") == "inversion":
                     items = data.get("items", [])
                     for it in items:
-                        # Truco de seguridad matemática para fondos indexados manuales:
-                        # Si la IA recibe inversión y valor actual, aseguramos que el valor actual se compute bien.
                         agregar_activo_db(
                             ticker=it.get("ticker", "FONDO_MANUAL"),
                             nombre=it.get("nombre", "Fondo Indexado"),
