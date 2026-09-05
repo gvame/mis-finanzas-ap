@@ -4,6 +4,7 @@ import yfinance as yf
 import requests
 import json
 import plotly.express as px
+from datetime import date, datetime
 from supabase import create_client, Client
 
 # --- CONFIGURACIÓN DE PÁGINA ---
@@ -76,8 +77,7 @@ def cargar_activos():
     try:
         res = supabase.table("activos").select("*").execute()
         return res.data or []
-    except Exception as e:
-        # Si la tabla no tuviera las columnas nuevas de tipo, no rompe la app
+    except Exception:
         return []
 
 def registrar_movimiento_db(concepto, monto, tipo):
@@ -90,30 +90,34 @@ def registrar_movimiento_db(concepto, monto, tipo):
     except Exception as e:
         st.error(f"Error al registrar movimiento: {e}")
 
-def agregar_activo_db(ticker, nombre, acciones, precio_compra, tipo_activo="Acción/ETF"):
+def agregar_activo_db(ticker, nombre, acciones, precio_compra, tipo_activo="Acción/ETF", fecha_inicio=None, fecha_fin=None, interes_tae=0.0):
     try:
         supabase.table("activos").insert({
             "ticker": ticker,
             "nombre": nombre,
             "acciones": float(acciones),
             "precio_compra": float(precio_compra),
-            "tipo_activo": tipo_activo
+            "tipo_activo": tipo_activo,
+            "fecha_inicio": str(fecha_inicio) if fecha_inicio else None,
+            "fecha_fin": str(fecha_fin) if fecha_fin else None,
+            "interes_tae": float(interes_tae)
         }).execute()
-    except Exception as e:
-        # Fallback por si la columna tipo_activo aún no existe en Supabase
+    except Exception:
+        # Fallback si alguna columna extendida no existe en Supabase
         try:
             supabase.table("activos").insert({
                 "ticker": ticker,
                 "nombre": nombre,
                 "acciones": float(acciones),
-                "precio_compra": float(precio_compra)
+                "precio_compra": float(precio_compra),
+                "tipo_activo": tipo_activo
             }).execute()
         except Exception as err:
             st.error(f"Error al agregar activo: {err}")
 
 # --- MERCADO Y COTIZACIONES EN TIEMPO REAL ---
 def buscar_coincidencias(query):
-    url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=5&newsCount=0"
+    url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=6&newsCount=0"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         res = requests.get(url, headers=headers, timeout=5).json()
@@ -123,7 +127,7 @@ def buscar_coincidencias(query):
                 "name": q.get('longname') or q.get('shortname') or q.get('symbol'),
                 "exchange": q.get('exchDisp') or q.get('exchange')
             }
-            for q in res.get('quotes', []) if q.get('quoteType') in ['EQUITY', 'ETF', 'MUTUALFUND']
+            for q in res.get('quotes', []) if q.get('quoteType') in ['EQUITY', 'ETF', 'MUTUALFUND', 'INDEX']
         ]
     except Exception:
         return []
@@ -136,7 +140,7 @@ def obtener_precio_eur(ticker_code):
             return None
         precio = float(hist['Close'].iloc[-1])
         currency = stock.fast_info.currency
-        if currency == "USD":
+        if currency and currency.upper() == "USD":
             fx = yf.Ticker("EURUSD=X").history(period="1d")
             if not fx.empty:
                 precio /= float(fx['Close'].iloc[-1])
@@ -157,6 +161,8 @@ efectivo_disponible = balance_base + total_ingresos - total_gastos
 valor_portafolio_actual = 0.0
 total_invertido = 0.0
 
+hoy = date.today()
+
 for a in activos:
     acciones = float(a.get("acciones", 0))
     p_compra = float(a.get("precio_compra", 0))
@@ -165,17 +171,32 @@ for a in activos:
     inv = acciones * p_compra
     
     if tipo_act == "Depósito":
-        # Para depósitos, el valor actual es el capital aportado (o con un interés estimado si se desea)
-        p_actual = p_compra
-    elif tipo_act == "Fondo Indexado":
-        # Si tiene ticker de fondo indexado se intenta buscar, si no, se queda con el valor de compra o NAV ingresado
-        ticker = a.get("ticker", "")
-        p_actual = obtener_precio_eur(ticker) if ticker and ticker != "DEPOSITO" else p_compra
-    else:
-        # Acción / ETF normal
-        p_actual = obtener_precio_eur(a.get("ticker", "")) or p_compra
+        capital = acciones
+        tae = float(a.get("interes_tae", 0.0)) / 100.0
+        f_ini_str = a.get("fecha_inicio")
+        f_fin_str = a.get("fecha_fin")
         
-    val = acciones * p_actual
+        ganancia_dep = 0.0
+        if f_ini_str and f_fin_str:
+            try:
+                f_ini = datetime.strptime(f_ini_str.split()[0], "%Y-%m-%d").date()
+                f_fin = datetime.strptime(f_fin_str.split()[0], "%Y-%m-%d").date()
+                total_dias = (f_fin - f_ini).days
+                dias_transcurridos = (hoy - f_ini).days
+                dias_transcurridos = max(0, min(dias_transcurridos, total_dias))
+                if total_dias > 0:
+                    ganancia_dep = capital * (tae * (dias_transcurridos / 365.0))
+            except Exception:
+                pass
+        val = capital + ganancia_dep
+    elif tipo_act == "Fondo Indexado":
+        ticker = a.get("ticker", "")
+        p_actual = obtener_precio_eur(ticker) if ticker and ticker != "FONDO_MANUAL" else p_compra
+        val = acciones * p_actual
+    else:
+        p_actual = obtener_precio_eur(a.get("ticker", "")) or p_compra
+        val = acciones * p_actual
+        
     total_invertido += inv
     valor_portafolio_actual += val
 
@@ -248,7 +269,7 @@ with tab_gastos:
 # 3. INVERSIONES (Acciones, Fondos y Depósitos)
 # ==========================================
 with tab_inversiones:
-    st.subheader("🏢 Gestión de Inversiones")
+    st.subheader("🏢 Gestión de Inversiones en Tiempo Real")
     
     tipo_seleccionado = st.radio("Selecciona el tipo de activo a añadir:", ["Acción / ETF", "Fondo Indexado", "Depósito Bancario"], horizontal=True)
     st.divider()
@@ -264,7 +285,7 @@ with tab_inversiones:
                 
                 c_acc, c_prec = st.columns(2)
                 with c_acc:
-                    num_acc = st.number_input("Nº Acciones / Participaciones:", min_value=0.001, value=1.0)
+                    num_acc = st.number_input("Nº Acciones:", min_value=0.001, value=1.0)
                 with c_prec:
                     prec_c = st.number_input("Precio compra medio (€):", min_value=0.0, value=150.0)
                     
@@ -274,10 +295,20 @@ with tab_inversiones:
                     st.rerun()
 
     elif tipo_seleccionado == "Fondo Indexado":
-        st.caption("Añade tu fondo indexado (puedes buscar su ISIN/Ticker en Yahoo Finance o introducirlo manualmente).")
-        f_nombre = st.text_input("Nombre del Fondo (ej: Vanguard Global Stock Index):", value="Vanguard Global Stock")
-        f_ticker = st.text_input("Ticker / ISIN en Yahoo Finance (opcional, ej: 0P00001GMI.F o déjalo manual):", value="")
+        st.caption("Añade tu fondo indexado (búscalo en Yahoo Finance por nombre/ISIN o configúralo en tiempo real).")
+        f_busqueda = st.text_input("Buscar Fondo en Yahoo Finance (ej: Vanguard, MSCI World, IE00B4L5Y983):", value="Vanguard Global Stock")
         
+        f_ticker_final = "FONDO_MANUAL"
+        f_nombre_final = f_busqueda
+        
+        if f_busqueda:
+            opciones_fondo = buscar_coincidencias(f_busqueda)
+            if opciones_fondo:
+                dict_f = {f"{item['name']} ({item['symbol']})": item for item in opciones_fondo}
+                sel_f = st.selectbox("Selecciona fondo verificado de mercado:", list(dict_f.keys()))
+                f_ticker_final = dict_f[sel_f]["symbol"]
+                f_nombre_final = dict_f[sel_f]["name"]
+                
         c_part, c_vl = st.columns(2)
         with c_part:
             num_part = st.number_input("Número de Participaciones:", min_value=0.001, value=10.0)
@@ -285,25 +316,35 @@ with tab_inversiones:
             val_liq = st.number_input("Valor Liquidativo / Coste Medio (€):", min_value=0.0, value=100.0)
             
         if st.button("Añadir Fondo Indexado", use_container_width=True):
-            ticker_val = f_ticker.strip() if f_ticker.strip() else "FONDO_MANUAL"
-            agregar_activo_db(ticker_val, f_nombre, num_part, val_liq, "Fondo Indexado")
-            st.success(f"Añadido fondo {f_nombre} correctamente.")
+            agregar_activo_db(f_ticker_final, f_nombre_final, num_part, val_liq, "Fondo Indexado")
+            st.success(f"Añadido fondo {f_nombre_final} en tiempo real.")
             st.rerun()
 
     else:
-        st.caption("Registra tus depósitos a plazo fijo o cuentas remuneradas.")
+        st.caption("Registra tus depósitos a plazo fijo con cálculo temporal automatizado.")
         d_nombre = st.text_input("Nombre del Depósito (ej: Depósito Wizink 12M):", value="Depósito Plazo Fijo")
         d_capital = st.number_input("Capital Invertido (€):", min_value=0.0, value=5000.0)
-        d_interes = st.number_input("Interés Anual Estimado (% TAE):", min_value=0.0, value=3.0)
+        d_interes = st.number_input("Interés Anual (% TAE):", min_value=0.0, value=3.0)
         
+        c_d1, c_d2 = st.columns(2)
+        with c_d1:
+            f_inicio = st.date_input("Fecha de Inicio:", value=date.today())
+        with c_d2:
+            f_fin = st.date_input("Fecha de Vencimiento / Fin:", value=date(date.today().year + 1, date.today().month, date.today().day))
+            
         if st.button("Añadir Depósito", use_container_width=True):
-            # Guardamos el capital como 'acciones' y el tipo de interés como 'precio_compra' o referencia
-            agregar_activo_db("DEPOSITO", f"{d_nombre} ({d_interes}% TAE)", d_capital, 1.0, "Depósito")
+            agregar_activo_db("DEPOSITO", d_nombre, d_capital, 1.0, "Depósito", fecha_inicio=f_inicio, fecha_fin=f_fin, interes_tae=d_interes)
             st.success(f"Añadido depósito {d_nombre} correctamente.")
             st.rerun()
 
     st.divider()
-    st.subheader("💼 Desglose de Inversiones Actuales")
+    
+    # Controles de visualización de rentabilidad (Botón de alternancia %)
+    c_inf1, c_inf2 = st.columns([3, 1])
+    with c_inf1:
+        st.subheader("💼 Desglose de Inversiones Actuales")
+    with c_inf2:
+        modo_rentabilidad = st.radio("Ver rentabilidad en:", ["%", "€"], horizontal=True, label_visibility="collapsed")
 
     if activos:
         tabla = []
@@ -318,28 +359,55 @@ with tab_inversiones:
             tipo_act = item.get("tipo_activo", "Acción/ETF")
             
             if tipo_act == "Depósito":
-                p_actual = 1.0
-                inv = acciones * p_compra # Aquí 'acciones' guarda el capital total introducido
-                val = inv
+                capital = acciones
+                tae = float(item.get("interes_tae", 0.0)) / 100.0
+                f_ini_str = item.get("fecha_inicio")
+                f_fin_str = item.get("fecha_fin")
+                
+                ganancia_dep = 0.0
+                if f_ini_str and f_fin_str:
+                    try:
+                        f_ini = datetime.strptime(f_ini_str.split()[0], "%Y-%m-%d").date()
+                        f_fin = datetime.strptime(f_fin_str.split()[0], "%Y-%m-%d").date()
+                        total_dias = (f_fin - f_ini).days
+                        dias_transcurridos = (hoy - f_ini).days
+                        dias_transcurridos = max(0, min(dias_transcurridos, total_dias))
+                        if total_dias > 0:
+                            ganancia_dep = capital * (tae * (dias_transcurridos / 365.0))
+                    except Exception:
+                        pass
+                inv = capital
+                val = capital + ganancia_dep
+                gan = ganancia_dep
+                pnl = (gan / inv) * 100 if inv > 0 else 0
             elif tipo_act == "Fondo Indexado":
                 p_actual = obtener_precio_eur(ticker) if ticker and ticker != "FONDO_MANUAL" else p_compra
                 inv = acciones * p_compra
                 val = acciones * p_actual
+                gan = val - inv
+                pnl = (gan / inv) * 100 if inv > 0 else 0
             else:
                 p_actual = obtener_precio_eur(ticker) or p_compra
                 inv = acciones * p_compra
                 val = acciones * p_actual
+                gan = val - inv
+                pnl = (gan / inv) * 100 if inv > 0 else 0
                 
-            gan = val - inv
-            pnl = (gan / inv) * 100 if inv > 0 else 0
+            # Formato de celda con color condicional HTML (Verde beneficio / Rojo pérdida)
+            if modo_rentabilidad == "%":
+                txt_rent = f"{pnl:+.2f}%"
+            else:
+                txt_rent = f"{gan:+.2f} €"
+                
+            color_estilo = "color: #2e7d32; font-weight: bold;" if gan >= 0 else "color: #c62828; font-weight: bold;"
+            rentabilidad_html = f'<span style="{color_estilo}">{txt_rent}</span>'
             
             tabla.append({
                 "Tipo": tipo_act,
                 "Activo": nombre,
-                "Cantidad / Título": acciones,
-                "Precio/Coste (€)": f"{p_compra:.2f}",
-                "Valor Actual (€)": f"{val:.2f}",
-                "Rendimiento": f"{gan:+.2f} € ({pnl:+.2f}%)"
+                "Invertido (€)": f"{inv:,.2f}",
+                "Valor Actual (€)": f"{val:,.2f}",
+                "Rentabilidad": rentabilidad_html
             })
             
             grafico_data.append({"Activo": nombre, "Valor (€)": val})
@@ -348,8 +416,10 @@ with tab_inversiones:
             else:
                 grafico_tipo_data["Acción/ETF"] += val
             
-        st.dataframe(pd.DataFrame(tabla), use_container_width=True)
+        df_tabla = pd.DataFrame(tabla)
+        st.markdown(df_tabla.to_html(escape=False, index=False), unsafe_allow_html=True)
         
+        st.write("")
         col_g1, col_g2 = st.columns(2)
         with col_g1:
             st.markdown("**Distribución por Tipo de Inversión**")
@@ -361,7 +431,7 @@ with tab_inversiones:
                 st.info("Sin datos para gráficos.")
             
         with col_g2:
-            st.markdown("**Patrimonio: Efectivo vs Inversiones**")
+            st.markdown("**Capital: Efectivo vs Inversiones**")
             df_patrimonio = pd.DataFrame([
                 {"Tipo": "Efectivo Libre", "Monto": efectivo_disponible},
                 {"Tipo": "Inversiones", "Monto": valor_portafolio_actual}
@@ -369,7 +439,7 @@ with tab_inversiones:
             fig_bar = px.bar(df_patrimonio, x="Tipo", y="Monto", color="Tipo", text_auto=".2f")
             st.plotly_chart(fig_bar, use_container_width=True)
     else:
-        st.info("Añade tus inversiones (acciones, fondos o depósitos) para visualizar el desglose y gráficos.")
+        st.info("Añade tus inversiones para visualizar el desglose en tiempo real.")
 
 # ==========================================
 # 4. ASESOR IA EJECUTOR
