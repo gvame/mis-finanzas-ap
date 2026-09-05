@@ -6,6 +6,7 @@ import json
 from datetime import date, datetime
 from supabase import create_client, Client
 import io
+import time
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Copiloto Financiero SaaS", page_icon="💰", layout="wide")
@@ -477,6 +478,7 @@ with tab_ia:
         else:
             try:
                 from google import genai
+                
                 client = genai.Client(api_key=api_key)
                 
                 prompt_ia = f"""
@@ -503,31 +505,38 @@ with tab_ia:
                 }}
                 """
                 
-                # Lista masiva de respaldo con 5 modelos alternativos en cadena para evitar colapsos 503
+                # Modelos oficiales y compatibles con generateContent
                 modelos_a_probar = [
-                    "gemini-2.5-flash",
                     "gemini-2.0-flash",
-                    "gemini-1.5-flash",
-                    "gemini-2.5-pro",
-                    "gemini-1.5-pro"
+                    "gemini-1.5-flash"
                 ]
                 
                 res = None
                 ultimo_error = None
+                max_intentos = 3  # Número máximo de rondas de reintento
                 
-                for mod in modelos_a_probar:
-                    try:
-                        res = client.models.generate_content(
-                            model=mod,
-                            contents=prompt_ia
-                        )
-                        break  # Si encuentra un modelo libre, sale del bucle con éxito
-                    except Exception as err:
-                        ultimo_error = err
-                        continue
+                # Mensaje visual de carga en pantalla para evitar sensación de congelamiento
+                with st.spinner("🤖 Procesando con la IA (reintentando automáticamente si hay congestión)..."):
+                    for intento in range(max_intentos):
+                        for mod in modelos_a_probar:
+                            try:
+                                res = client.models.generate_content(
+                                    model=mod,
+                                    contents=prompt_ia
+                                )
+                                break  # Salir del bucle interno si responde con éxito
+                            except Exception as err:
+                                ultimo_error = err
+                                continue
+                        
+                        if res is not None:
+                            break
+                        
+                        # Pausa de 2 segundos entre rondas para liberar la carga del servidor
+                        time.sleep(2)
                 
                 if res is None:
-                    raise Exception(f"Todos los servidores de IA están saturados en este momento. Detalle: {ultimo_error}")
+                    raise Exception(f"Los servidores están temporalmente ocupados. Detalle técnico: {ultimo_error}")
                 
                 texto_limpio = res.text.replace("```json", "").replace("```", "").strip()
                 data = json.loads(texto_limpio)
