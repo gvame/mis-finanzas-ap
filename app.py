@@ -478,6 +478,7 @@ with tab_ia:
         else:
             try:
                 from google import genai
+                import time
                 
                 client = genai.Client(api_key=api_key)
                 
@@ -505,38 +506,39 @@ with tab_ia:
                 }}
                 """
                 
-                # Modelos oficiales y compatibles con generateContent
+                # Modelos oficiales vigentes y contrastados
                 modelos_a_probar = [
-                    "gemini-2.0-flash",
-                    "gemini-1.5-flash"
+                    "gemini-2.5-flash",
+                    "gemini-3.5-flash"
                 ]
                 
                 res = None
                 ultimo_error = None
-                max_intentos = 3  # Número máximo de rondas de reintento
+                tiempo_limite = 30  # Mínimo 30 segundos de persistencia activa ante saturación
+                inicio_proceso = time.time()
                 
-                # Mensaje visual de carga en pantalla para evitar sensación de congelamiento
-                with st.spinner("🤖 Procesando con la IA (reintentando automáticamente si hay congestión)..."):
-                    for intento in range(max_intentos):
+                # Barra de carga visible y persistente durante 30 segundos ante congestión
+                with st.spinner("🤖 Procesando solicitud... Reintentando automáticamente conexión con la IA (hasta 30 segundos si hay alta congestión en los servidores)..."):
+                    while (time.time() - inicio_proceso) < tiempo_limite:
                         for mod in modelos_a_probar:
                             try:
                                 res = client.models.generate_content(
                                     model=mod,
                                     contents=prompt_ia
                                 )
-                                break  # Salir del bucle interno si responde con éxito
+                                break  # Éxito: sale del bucle de modelos
                             except Exception as err:
                                 ultimo_error = err
                                 continue
                         
                         if res is not None:
-                            break
+                            break  # Éxito: sale del bucle temporal general
                         
-                        # Pausa de 2 segundos entre rondas para liberar la carga del servidor
-                        time.sleep(2)
+                        # Pausa de 3 segundos entre cada intento para no sobrecargar
+                        time.sleep(3)
                 
                 if res is None:
-                    raise Exception(f"Los servidores están temporalmente ocupados. Detalle técnico: {ultimo_error}")
+                    raise Exception(f"Los servidores continuaron saturados tras 30 segundos de reintentos continuos. Detalle técnico: {ultimo_error}")
                 
                 texto_limpio = res.text.replace("```json", "").replace("```", "").strip()
                 data = json.loads(texto_limpio)
