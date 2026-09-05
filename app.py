@@ -44,7 +44,7 @@ with st.sidebar:
         st.rerun()
     st.divider()
 
-# --- FUNCIONES DE BASE DE DATOS (LIBRES DE PGRST125) ---
+# --- FUNCIONES DE BASE DE DATOS ---
 def cargar_transacciones():
     try:
         res = supabase.table("transacciones").select("*").execute()
@@ -55,7 +55,6 @@ def cargar_transacciones():
 def cargar_balance_base():
     try:
         transacciones = cargar_transacciones()
-        # Buscamos el último saldo inicial registrado en transacciones
         for t in reversed(transacciones):
             if t.get("concepto") == "SALDO_INICIAL":
                 return float(t.get("monto", 0.0))
@@ -65,7 +64,6 @@ def cargar_balance_base():
 
 def actualizar_balance_base(nuevo_monto):
     try:
-        # Guardamos el saldo inicial como un registro especial en transacciones (solo insert, sin errores de PK)
         supabase.table("transacciones").insert({
             "concepto": "SALDO_INICIAL",
             "monto": float(nuevo_monto),
@@ -142,7 +140,6 @@ balance_base = cargar_balance_base()
 activos = cargar_activos()
 
 # --- CÁLCULOS MÉTRICOS PRINCIPALES ---
-# Filtramos para que los movimientos de tipo "Config" (Saldo Inicial) no alteren los ingresos/gastos normales
 total_ingresos = sum(t.get("monto", 0) for t in transacciones if t.get("tipo") == "Ingreso")
 total_gastos = sum(t.get("monto", 0) for t in transacciones if t.get("tipo") == "Gasto")
 efectivo_disponible = balance_base + total_ingresos - total_gastos
@@ -216,7 +213,6 @@ with tab_gastos:
 
     st.divider()
     st.subheader("📊 Historial de Transacciones")
-    # Filtramos para mostrar solo los movimientos reales de gastos/ingresos (ocultando las configuraciones internas)
     transacciones_visibles = [t for t in transacciones if t.get("tipo") != "Config"]
     if transacciones_visibles:
         df_trans = pd.DataFrame(transacciones_visibles)
