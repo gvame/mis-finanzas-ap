@@ -72,7 +72,7 @@ with st.sidebar:
                 st.session_state.confirmar_borrado_total = False
                 st.rerun()
 
-# --- FUNCIONES DE BASE DE DATOS (TODO EN TRANSACCIONES) ---
+# --- FUNCIONES DE BASE DE DATOS ---
 def cargar_datos_brutos():
     try:
         res = supabase.table("transacciones").select("*").execute()
@@ -80,7 +80,7 @@ def cargar_datos_brutos():
     except Exception:
         return []
 
-def registrar_transaccion(concepto, monto, tipo, ticker="", extra_data=""):
+def registrar_transaccion(concepto, monto, tipo):
     try:
         supabase.table("transacciones").insert({
             "concepto": str(concepto),
@@ -97,10 +97,10 @@ def eliminar_registro_db(reg_id):
     except Exception as e:
         st.error(f"Error al eliminar: {e}")
 
-def actualizar_monto_db(reg_id, nuevo_monto):
+def actualizar_valor_db(reg_id, nuevo_valor):
     try:
         supabase.table("transacciones").update({
-            "monto": float(nuevo_monto)
+            "monto": float(nuevo_valor)
         }).eq("id", reg_id).execute()
     except Exception as e:
         st.error(f"Error al actualizar en BD: {e}")
@@ -175,53 +175,44 @@ total_gastos = sum(t.get("monto", 0) for t in transacciones if t.get("tipo") == 
 efectivo_base_total = sum(saldos_cuentas.values())
 efectivo_disponible = efectivo_base_total + total_ingresos - total_gastos
 
-valor_portafolio_actual = 0.0
-total_invertido = 0.0
-
-for a in activos:
-    # Usamos el campo monto para almacenar el valor actual o el precio de compra según convenga, 
-    # o guardamos la estructura en el concepto. Para simplificar:
-    # Guardamos en 'monto' el valor actual o guardaremos un diccionario serializado en concepto.
-    pass # Los cálculos se detallan abajo en su pestaña correspondiente
-
-# --- INTERFAZ / PANEL SUPERIOR ---
-st.title("💰 Copiloto Financiero & Multicuenta")
-
-# Recálculo rápido para métricas
 val_portafolio = 0.0
 inv_total = 0.0
+
 for a in activos:
     try:
         partes = a.get("concepto", "").split("|||")
-        # Formato concepto: Nombre | Acciones | PrecioCompra | ValorManual | TipoActivo
-        if len(partes) >= 5:
+        if len(partes) >= 4:
             nombre = partes[0]
             acciones = float(partes[1])
             p_compra = float(partes[2])
-            val_manual = float(partes[3])
-            tipo_act = partes[4]
-            ticker = a.get("monto", "MANUAL") # Usamos monto temporalmente o ticker
+            tipo_act = partes[3]
+            val_actual_guardado = float(a.get("monto", 0.0))
             
-            # Re-evaluamos inversión y valor
             if tipo_act in ["Depósito", "Cuenta Remunerada"]:
                 inv = acciones
-                val = val_manual if val_manual > 0 else inv
+                val = val_actual_guardado if val_actual_guardado > 0 else inv
             elif tipo_act == "Fondo Indexado":
                 inv = p_compra
-                val = val_manual if val_manual > 0 else inv
-            else:
+                val = val_actual_guardado if val_actual_guardado > 0 else inv
+            else: # Acción/ETF
                 inv = acciones * p_compra
-                p_actual = obtener_precio_eur(ticker) if ticker and ticker not in ["MANUAL", "CUENTA"] else 0
+                # Intentar cotización online si hay ticker guardado en partes[4]
+                ticker = partes[4] if len(partes) > 4 else "MANUAL"
+                p_actual = obtener_precio_eur(ticker) if ticker and ticker != "MANUAL" else 0
                 if p_actual and p_actual > 0:
                     val = acciones * p_actual
                 else:
-                    val = val_manual if val_manual > 0 else inv
+                    val = val_actual_guardado if val_actual_guardado > 0 else inv
+                    
             inv_total += inv
             val_portafolio += val
     except Exception:
         pass
 
 capital_total = efectivo_disponible + val_portafolio
+
+# --- INTERFAZ / PANEL SUPERIOR ---
+st.title("💰 Copiloto Financiero & Multicuenta")
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Capital Total", f"{capital_total:,.2f} €")
@@ -302,11 +293,11 @@ with tab_inversiones:
     tipo_seleccionado = st.radio("Tipo de activo o cuenta:", ["Acción / ETF", "Fondo Indexado", "Cuenta Remunerada / Depósito"], horizontal=True)
     st.write("")
     
-    def agregar_activo_seguro(ticker, nombre, acciones, precio_compra, tipo_activo, valor_actual_manual=0.0):
-        # Guardamos todo empaquetado en el campo concepto de la tabla transacciones para evitar alterar esquemas
-        # Formato: Nombre ||| Acciones ||| PrecioCompra ||| ValorManual ||| TipoActivo
-        payload = f"{nombre}|||{acciones}|||{precio_compra}|||{valor_actual_manual}|||{tipo_activo}"
-        registrar_transaccion(payload, 0.0, tipo_activo)
+    def agregar_activo_seguro(nombre, acciones, precio_compra, valor_actual, tipo_activo, ticker="MANUAL"):
+        # Formato concepto: Nombre ||| Acciones ||| PrecioCompra ||| TipoActivo ||| Ticker
+        # Guardamos en la columna 'monto' el valor actual directamente para que contabilice perfecto
+        payload = f"{nombre}|||{acciones}|||{precio_compra}|||{tipo_activo}|||{ticker}"
+        registrar_transaccion(payload, valor_actual, tipo_activo)
 
     if tipo_seleccionado == "Acción / ETF":
         busqueda = st.text_input("Buscar Acción o ETF (ej: AVAV, VRT, VKTX):", value="AVAV")
@@ -325,7 +316,9 @@ with tab_inversiones:
                     
                 if st.button("Añadir Acción/ETF", use_container_width=True):
                     precio_unitario = prec_c / num_acc if num_acc > 0 else 0
-                    agregar_activo_seguro(activo_elegido["symbol"], activo_elegido["name"], num_acc, precio_unitario, "Acción/ETF")
+                    p_online = obtener_precio_eur(activo_elegido["symbol"])
+                    val_ini = (num_acc * p_online) if p_online and p_online > 0 else prec_c
+                    agregar_activo_seguro(activo_elegido["name"], num_acc, precio_unitario, val_ini, "Acción/ETF", ticker=activo_elegido["symbol"])
                     st.success("Acción añadida correctamente.")
                     st.rerun()
 
@@ -338,16 +331,16 @@ with tab_inversiones:
             total_actual_input = st.number_input("Valor Actual Total (€):", min_value=0.0, value=1797.24)
             
         if st.button("Añadir Fondo Indexado", use_container_width=True):
-            agregar_activo_seguro("40068337561", f_nombre, 1.0, total_invertido_input, "Fondo Indexado", valor_actual_manual=total_actual_input)
+            agregar_activo_seguro(f_nombre, 1.0, total_invertido_input, total_actual_input, "Fondo Indexado", ticker="40068337561")
             st.success("Fondo indexado añadido correctamente.")
             st.rerun()
 
     else:
-        cr_nombre = st.text_input("Nombre del Depósito:", value="Depósito bancario")
+        cr_nombre = st.text_input("Nombre del Depósito / Cuenta Remunerada:", value="Cuenta Remunerada")
         cr_capital = st.number_input("Capital Depositado / Valor Actual (€):", min_value=0.0, value=1239.54)
             
         if st.button("Añadir Depósito / Cuenta Remunerada", use_container_width=True):
-            agregar_activo_seguro("DEPOSITO", cr_nombre, cr_capital, 1.0, "Cuenta Remunerada", valor_actual_manual=cr_capital)
+            agregar_activo_seguro(cr_nombre, cr_capital, 1.0, cr_capital, "Cuenta Remunerada", ticker="DEPOSITO")
             st.success("Depósito añadido correctamente.")
             st.rerun()
 
@@ -358,29 +351,29 @@ with tab_inversiones:
         tabla = []
         for item in activos:
             act_id = item.get("id")
+            val_actual_guardado = float(item.get("monto", 0.0))
             partes = item.get("concepto", "").split("|||")
-            if len(partes) < 5:
+            if len(partes) < 4:
                 continue
             nombre = partes[0]
             acciones = float(partes[1])
             p_compra = float(partes[2])
-            val_manual = float(partes[3])
-            tipo_act = partes[4]
-            ticker = "MANUAL"
+            tipo_act = partes[3]
+            ticker = partes[4] if len(partes) > 4 else "MANUAL"
             
             if tipo_act in ["Depósito", "Cuenta Remunerada"]:
                 inv = acciones
-                val = val_manual if val_manual > 0 else inv
+                val = val_actual_guardado
             elif tipo_act == "Fondo Indexado":
                 inv = p_compra
-                val = val_manual if val_manual > 0 else inv
+                val = val_actual_guardado
             else:
                 inv = acciones * p_compra
-                p_actual = obtener_precio_eur(ticker) if ticker and ticker not in ["MANUAL", "CUENTA"] else 0
+                p_actual = obtener_precio_eur(ticker) if ticker and ticker != "MANUAL" else 0
                 if p_actual and p_actual > 0:
                     val = acciones * p_actual
                 else:
-                    val = val_manual if val_manual > 0 else inv
+                    val = val_actual_guardado if val_actual_guardado > 0 else inv
                 
             gan = val - inv
             rent_pct = (gan / inv * 100) if inv > 0 else 0.0
@@ -392,8 +385,7 @@ with tab_inversiones:
                 "Invertido (€)": round(inv, 2),
                 "Valor Actual (€)": round(val, 2),
                 "Ganancia (€)": round(gan, 2),
-                "Rentabilidad (%)": round(rent_pct, 2),
-                "datos_originales": partes
+                "Rentabilidad (%)": round(rent_pct, 2)
             })
             
         if tabla:
@@ -405,7 +397,6 @@ with tab_inversiones:
                 df_tabla,
                 column_config={
                     "id": None,
-                    "datos_originales": None,
                     "Tipo": st.column_config.TextColumn("Tipo", disabled=True),
                     "Activo": st.column_config.TextColumn("Activo", disabled=True),
                     "Invertido (€)": st.column_config.NumberColumn("Invertido (€)", format="%.2f €", disabled=True),
@@ -420,14 +411,7 @@ with tab_inversiones:
             
             if st.button("💾 Guardar Actualización de Valores en la BD", type="primary"):
                 for _, row in df_editado.iterrows():
-                    p = row["datos_originales"]
-                    nuevo_val = row["Valor Actual (€)"]
-                    # Reconstruir concepto actualizado
-                    nuevo_concepto = f"{p[0]}|||{p[1]}|||{p[2]}|||{nuevo_val}|||{p[4]}"
-                    try:
-                        supabase.table("transacciones").update({"concepto": nuevo_concepto}).eq("id", row["id"]).execute()
-                    except Exception:
-                        pass
+                    actualizar_valor_db(row["id"], row["Valor Actual (€)"])
                 st.success("¡Valores actualizados correctamente!")
                 st.rerun()
                 
@@ -467,10 +451,11 @@ with tab_ia:
                 
                 Para cada activo extrae:
                 - "tipo_activo": "Acción/ETF", "Fondo Indexado" o "Cuenta Remunerada".
+                - "ticker": Ticker bursátil (ej: AVAV) si es acción, ISIN si es fondo, o "DEPOSITO" si es cuenta remunerada.
                 - "nombre": Nombre descriptivo.
-                - "acciones": Número de acciones (si es acción, pon la cantidad exacta como decimal; si es fondo pon 1.0; si es depósito pon el capital).
-                - "precio_compra": Si es acción, pon el PRECIO TOTAL invertido en esa acción. Si es fondo, pon el CAPITAL INVERTIDO. Si es depósito, pon 1.0.
-                - "valor_actual_manual": Si se indica un valor actual de mercado (como en el fondo o depósito), ponlo aquí. Si no, pon 0.0.
+                - "acciones": Número de acciones (si es acción, pon la cantidad exacta como decimal; si es fondo o cuenta remunerada pon 1.0).
+                - "precio_compra": Si es acción, pon el PRECIO TOTAL invertido en esa acción. Si es fondo, pon el CAPITAL INVERTIDO. Si es cuenta remunerada, pon el capital total.
+                - "valor_actual": El valor actual de mercado o saldo actual de la cuenta/fondo. Si es acción y no se indica, pon el mismo valor que el precio de compra.
                 
                 Responde ÚNICAMENTE con un JSON puro (sin bloques de código markdown ```json) con esta estructura exacta:
                 {{
@@ -478,10 +463,11 @@ with tab_ia:
                   "items": [
                     {{
                       "tipo_activo": "...",
+                      "ticker": "...",
                       "nombre": "...",
                       "acciones": 0.0,
                       "precio_compra": 0.0,
-                      "valor_actual_manual": 0.0
+                      "valor_actual": 0.0
                     }}
                   ]
                 }}
@@ -517,21 +503,19 @@ with tab_ia:
                         t_act = it.get("tipo_activo", "Acción/ETF")
                         acc = float(it.get("acciones", 1.0))
                         p_c = float(it.get("precio_compra", 0.0))
-                        v_man = float(it.get("valor_actual_manual", 0.0))
+                        val_act = float(it.get("valor_actual", p_c))
+                        ticker = it.get("ticker", "MANUAL")
                         
                         if t_act == "Acción/ETF" and acc > 0:
                             p_c = p_c / acc
-                        
-                        if t_act == "Cuenta Remunerada" and v_man == 0.0:
-                            v_man = acc
                             
                         agregar_activo_seguro(
-                            ticker="MANUAL",
                             nombre=it.get("nombre", "Activo IA"),
                             acciones=acc,
                             precio_compra=p_c,
+                            valor_actual=val_act,
                             tipo_activo=t_act,
-                            valor_actual_manual=v_man
+                            ticker=ticker
                         )
                     st.success(f"¡IA: Inversiones interpretadas y añadidas con éxito!")
                 else:
@@ -540,3 +524,4 @@ with tab_ia:
                 st.rerun()
             except Exception as e:
                 st.error(f"Error procesando con IA: {e}")
+            
