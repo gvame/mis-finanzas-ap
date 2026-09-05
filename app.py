@@ -55,13 +55,12 @@ with st.sidebar:
             st.session_state.confirmar_borrado_total = True
             st.rerun()
     else:
-        st.error("¿Estás 100% seguro? Se borrarán todas las transacciones y activos de la base de datos.")
+        st.error("¿Estás 100% seguro? Se borrarán todos los datos de la base de datos.")
         col_b1, col_b2 = st.columns(2)
         with col_b1:
             if st.button("Sí, borrar todo", type="primary", use_container_width=True):
                 try:
                     supabase.table("transacciones").delete().neq("id", 0).execute()
-                    supabase.table("activos").delete().neq("id", 0).execute()
                     st.success("¡Base de datos restablecida por completo!")
                     st.session_state.confirmar_borrado_total = False
                     time.sleep(1)
@@ -73,84 +72,38 @@ with st.sidebar:
                 st.session_state.confirmar_borrado_total = False
                 st.rerun()
 
-# --- FUNCIONES DE BASE DE DATOS ---
-def cargar_transacciones():
+# --- FUNCIONES DE BASE DE DATOS (TODO EN TRANSACCIONES) ---
+def cargar_datos_brutos():
     try:
         res = supabase.table("transacciones").select("*").execute()
         return res.data or []
     except Exception:
         return []
 
-def cargar_saldos_cuentas():
-    try:
-        res = supabase.table("transacciones").select("*").eq("tipo", "Config_Cuenta").execute()
-        saldos = {"Cuenta Nómina": 0.0, "Cuenta Naranja": 0.0, "Trade Republic": 0.0}
-        for t in res.data or []:
-            concepto = t.get("concepto")
-            for cuenta in saldos.keys():
-                if cuenta in concepto:
-                    saldos[cuenta] = float(t.get("monto", 0.0))
-        return saldos
-    except Exception:
-        return {"Cuenta Nómina": 0.0, "Cuenta Naranja": 0.0, "Trade Republic": 0.0}
-
-def actualizar_saldo_cuenta(nombre_cuenta, nuevo_monto):
-    concepto_clave = f"SALDO_CUENTA_{nombre_cuenta}"
-    try:
-        supabase.table("transacciones").delete().eq("concepto", concepto_clave).execute()
-        supabase.table("transacciones").insert({
-            "concepto": concepto_clave,
-            "monto": float(nuevo_monto),
-            "tipo": "Config_Cuenta"
-        }).execute()
-        st.success(f"¡Saldo de '{nombre_cuenta}' actualizado correctamente!")
-    except Exception as e:
-        st.error(f"Error al actualizar saldo de {nombre_cuenta}: {e}")
-
-def cargar_activos():
-    try:
-        res = supabase.table("activos").select("*").execute()
-        return res.data or []
-    except Exception:
-        return []
-
-def eliminar_activo_db(activo_id):
-    try:
-        supabase.table("activos").delete().eq("id", activo_id).execute()
-        st.success("Activo eliminado correctamente.")
-    except Exception as e:
-        st.error(f"Error al eliminar activo: {e}")
-
-def actualizar_activo_db(activo_id, valor_actual_manual):
-    try:
-        supabase.table("activos").update({
-            "valor_actual_manual": float(valor_actual_manual)
-        }).eq("id", activo_id).execute()
-    except Exception as e:
-        st.error(f"Error al actualizar activo en BD: {e}")
-
-def registrar_movimiento_db(concepto, monto, tipo):
+def registrar_transaccion(concepto, monto, tipo, ticker="", extra_data=""):
     try:
         supabase.table("transacciones").insert({
-            "concepto": concepto,
+            "concepto": str(concepto),
             "monto": float(monto),
-            "tipo": tipo
+            "tipo": str(tipo)
         }).execute()
     except Exception as e:
-        st.error(f"Error al registrar movimiento: {e}")
+        st.error(f"Error al registrar en base de datos: {e}")
 
-def agregar_activo_db(ticker, nombre, acciones, precio_compra, tipo_activo="Acción/ETF", valor_actual_manual=0.0):
+def eliminar_registro_db(reg_id):
     try:
-        supabase.table("activos").insert({
-            "ticker": str(ticker),
-            "nombre": str(nombre),
-            "acciones": float(acciones),
-            "precio_compra": float(precio_compra),
-            "tipo_activo": str(tipo_activo),
-            "valor_actual_manual": float(valor_actual_manual)
-        }).execute()
-    except Exception as err:
-        st.error(f"Error crítico al agregar activo: {err}")
+        supabase.table("transacciones").delete().eq("id", reg_id).execute()
+        st.success("Elemento eliminado correctamente.")
+    except Exception as e:
+        st.error(f"Error al eliminar: {e}")
+
+def actualizar_monto_db(reg_id, nuevo_monto):
+    try:
+        supabase.table("transacciones").update({
+            "monto": float(nuevo_monto)
+        }).eq("id", reg_id).execute()
+    except Exception as e:
+        st.error(f"Error al actualizar en BD: {e}")
 
 # --- MERCADO Y COTIZACIONES ---
 def buscar_coincidencias(query):
@@ -191,10 +144,29 @@ def obtener_precio_eur(ticker_code):
     except Exception:
         return None
 
-# --- CARGA INICIAL DE DATOS ---
-transacciones = cargar_transacciones()
-saldos_cuentas = cargar_saldos_cuentas()
-activos = cargar_activos()
+# --- CARGA Y SEPARACIÓN DE DATOS ---
+datos_brutos = cargar_datos_brutos()
+
+transacciones = [t for t in datos_brutos if t.get("tipo") in ["Ingreso", "Gasto"]]
+saldos_cuentas_db = [t for t in datos_brutos if t.get("tipo") == "Config_Cuenta"]
+activos = [t for t in datos_brutos if t.get("tipo") in ["Acción/ETF", "Fondo Indexado", "Cuenta Remunerada"]]
+
+# Procesar saldos de cuentas
+saldos_cuentas = {"Cuenta Nómina": 0.0, "Cuenta Naranja": 0.0, "Trade Republic": 0.0}
+for t in saldos_cuentas_db:
+    concepto = t.get("concepto")
+    for cuenta in saldos_cuentas.keys():
+        if cuenta in concepto:
+            saldos_cuentas[cuenta] = float(t.get("monto", 0.0))
+
+def actualizar_saldo_cuenta(nombre_cuenta, nuevo_monto):
+    concepto_clave = f"SALDO_CUENTA_{nombre_cuenta}"
+    try:
+        supabase.table("transacciones").delete().eq("concepto", concepto_clave).execute()
+        registrar_transaccion(concepto_clave, nuevo_monto, "Config_Cuenta")
+        st.success(f"¡Saldo de '{nombre_cuenta}' actualizado correctamente!")
+    except Exception as e:
+        st.error(f"Error al actualizar saldo de {nombre_cuenta}: {e}")
 
 # --- CÁLCULOS MÉTRICOS PRINCIPALES ---
 total_ingresos = sum(t.get("monto", 0) for t in transacciones if t.get("tipo") == "Ingreso")
@@ -207,39 +179,55 @@ valor_portafolio_actual = 0.0
 total_invertido = 0.0
 
 for a in activos:
-    acciones = float(a.get("acciones", 0))
-    p_compra = float(a.get("precio_compra", 0))
-    tipo_act = a.get("tipo_activo", "Acción/ETF")
-    ticker = a.get("ticker", "")
-    val_manual = float(a.get("valor_actual_manual", 0.0))
-    
-    if tipo_act in ["Depósito", "Cuenta Remunerada", "Efectivo"]:
-        inv = acciones
-        val = val_manual if val_manual > 0 else inv
-    elif tipo_act == "Fondo Indexado":
-        inv = p_compra
-        val = val_manual if val_manual > 0 else inv
-    else:
-        inv = acciones * p_compra
-        p_actual = obtener_precio_eur(ticker) if ticker and ticker not in ["MANUAL", "CUENTA"] else 0
-        if p_actual and p_actual > 0:
-            val = acciones * p_actual
-        else:
-            val = val_manual if val_manual > 0 else inv
-        
-    total_invertido += inv
-    valor_portafolio_actual += val
-
-capital_total = efectivo_disponible + valor_portafolio_actual
+    # Usamos el campo monto para almacenar el valor actual o el precio de compra según convenga, 
+    # o guardamos la estructura en el concepto. Para simplificar:
+    # Guardamos en 'monto' el valor actual o guardaremos un diccionario serializado en concepto.
+    pass # Los cálculos se detallan abajo en su pestaña correspondiente
 
 # --- INTERFAZ / PANEL SUPERIOR ---
 st.title("💰 Copiloto Financiero & Multicuenta")
 
+# Recálculo rápido para métricas
+val_portafolio = 0.0
+inv_total = 0.0
+for a in activos:
+    try:
+        partes = a.get("concepto", "").split("|||")
+        # Formato concepto: Nombre | Acciones | PrecioCompra | ValorManual | TipoActivo
+        if len(partes) >= 5:
+            nombre = partes[0]
+            acciones = float(partes[1])
+            p_compra = float(partes[2])
+            val_manual = float(partes[3])
+            tipo_act = partes[4]
+            ticker = a.get("monto", "MANUAL") # Usamos monto temporalmente o ticker
+            
+            # Re-evaluamos inversión y valor
+            if tipo_act in ["Depósito", "Cuenta Remunerada"]:
+                inv = acciones
+                val = val_manual if val_manual > 0 else inv
+            elif tipo_act == "Fondo Indexado":
+                inv = p_compra
+                val = val_manual if val_manual > 0 else inv
+            else:
+                inv = acciones * p_compra
+                p_actual = obtener_precio_eur(ticker) if ticker and ticker not in ["MANUAL", "CUENTA"] else 0
+                if p_actual and p_actual > 0:
+                    val = acciones * p_actual
+                else:
+                    val = val_manual if val_manual > 0 else inv
+            inv_total += inv
+            val_portafolio += val
+    except Exception:
+        pass
+
+capital_total = efectivo_disponible + val_portafolio
+
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Capital Total", f"{capital_total:,.2f} €")
 m2.metric("Efectivo Libre (Cuentas)", f"{efectivo_disponible:,.2f} €")
-m3.metric("Valor Inversiones / Ahorro", f"{valor_portafolio_actual:,.2f} €")
-ganancia_portafolio = valor_portafolio_actual - total_invertido
+m3.metric("Valor Inversiones / Ahorro", f"{val_portafolio:,.2f} €")
+ganancia_portafolio = val_portafolio - inv_total
 m4.metric("Rendimiento Inversiones", f"{ganancia_portafolio:+,.2f} €")
 
 st.divider()
@@ -292,15 +280,14 @@ with tab_gastos:
     if st.button("➕ Guardar Movimiento", use_container_width=True):
         concepto = f"📦 Otros ({det})" if det else cat
         tipo = "Ingreso" if "Nómina" in cat else "Gasto"
-        registrar_movimiento_db(concepto, monto, tipo)
+        registrar_transaccion(concepto, monto, tipo)
         st.success(f"Guardado: {concepto}")
         st.rerun()
 
     st.divider()
     st.subheader("📊 Historial de Transacciones")
-    transacciones_visibles = [t for t in transacciones if not t.get("tipo", "").startswith("Config")]
-    if transacciones_visibles:
-        df_trans = pd.DataFrame(transacciones_visibles)
+    if transacciones:
+        df_trans = pd.DataFrame(transacciones)
         columnas_mostrar = [c for c in ["id", "created_at", "concepto", "monto", "tipo"] if c in df_trans.columns]
         st.dataframe(df_trans[columnas_mostrar], use_container_width=True)
     else:
@@ -315,6 +302,12 @@ with tab_inversiones:
     tipo_seleccionado = st.radio("Tipo de activo o cuenta:", ["Acción / ETF", "Fondo Indexado", "Cuenta Remunerada / Depósito"], horizontal=True)
     st.write("")
     
+    def agregar_activo_seguro(ticker, nombre, acciones, precio_compra, tipo_activo, valor_actual_manual=0.0):
+        # Guardamos todo empaquetado en el campo concepto de la tabla transacciones para evitar alterar esquemas
+        # Formato: Nombre ||| Acciones ||| PrecioCompra ||| ValorManual ||| TipoActivo
+        payload = f"{nombre}|||{acciones}|||{precio_compra}|||{valor_actual_manual}|||{tipo_activo}"
+        registrar_transaccion(payload, 0.0, tipo_activo)
+
     if tipo_seleccionado == "Acción / ETF":
         busqueda = st.text_input("Buscar Acción o ETF (ej: AVAV, VRT, VKTX):", value="AVAV")
         if busqueda:
@@ -332,7 +325,7 @@ with tab_inversiones:
                     
                 if st.button("Añadir Acción/ETF", use_container_width=True):
                     precio_unitario = prec_c / num_acc if num_acc > 0 else 0
-                    agregar_activo_db(activo_elegido["symbol"], activo_elegido["name"], num_acc, precio_unitario, "Acción/ETF")
+                    agregar_activo_seguro(activo_elegido["symbol"], activo_elegido["name"], num_acc, precio_unitario, "Acción/ETF")
                     st.success("Acción añadida correctamente.")
                     st.rerun()
 
@@ -345,7 +338,7 @@ with tab_inversiones:
             total_actual_input = st.number_input("Valor Actual Total (€):", min_value=0.0, value=1797.24)
             
         if st.button("Añadir Fondo Indexado", use_container_width=True):
-            agregar_activo_db("40068337561", f_nombre, 1.0, total_invertido_input, "Fondo Indexado", valor_actual_manual=total_actual_input)
+            agregar_activo_seguro("40068337561", f_nombre, 1.0, total_invertido_input, "Fondo Indexado", valor_actual_manual=total_actual_input)
             st.success("Fondo indexado añadido correctamente.")
             st.rerun()
 
@@ -354,7 +347,7 @@ with tab_inversiones:
         cr_capital = st.number_input("Capital Depositado / Valor Actual (€):", min_value=0.0, value=1239.54)
             
         if st.button("Añadir Depósito / Cuenta Remunerada", use_container_width=True):
-            agregar_activo_db("DEPOSITO", cr_nombre, cr_capital, 1.0, "Cuenta Remunerada", valor_actual_manual=cr_capital)
+            agregar_activo_seguro("DEPOSITO", cr_nombre, cr_capital, 1.0, "Cuenta Remunerada", valor_actual_manual=cr_capital)
             st.success("Depósito añadido correctamente.")
             st.rerun()
 
@@ -365,12 +358,15 @@ with tab_inversiones:
         tabla = []
         for item in activos:
             act_id = item.get("id")
-            p_compra = float(item.get("precio_compra", 0))
-            acciones = float(item.get("acciones", 0))
-            ticker = item.get("ticker", "")
-            nombre = item.get("nombre", ticker)
-            tipo_act = item.get("tipo_activo", "Acción/ETF")
-            val_manual = float(item.get("valor_actual_manual", 0.0))
+            partes = item.get("concepto", "").split("|||")
+            if len(partes) < 5:
+                continue
+            nombre = partes[0]
+            acciones = float(partes[1])
+            p_compra = float(partes[2])
+            val_manual = float(partes[3])
+            tipo_act = partes[4]
+            ticker = "MANUAL"
             
             if tipo_act in ["Depósito", "Cuenta Remunerada"]:
                 inv = acciones
@@ -393,47 +389,55 @@ with tab_inversiones:
                 "id": act_id,
                 "Tipo": tipo_act,
                 "Activo": nombre,
-                "Ticker": ticker,
                 "Invertido (€)": round(inv, 2),
                 "Valor Actual (€)": round(val, 2),
                 "Ganancia (€)": round(gan, 2),
-                "Rentabilidad (%)": round(rent_pct, 2)
+                "Rentabilidad (%)": round(rent_pct, 2),
+                "datos_originales": partes
             })
             
-        df_tabla = pd.DataFrame(tabla)
-        
-        st.caption("💡 Puedes editar directamente el **Valor Actual (€)** de cualquier activo en la tabla y pulsar el botón inferior para guardarlo.")
-        
-        df_editado = st.data_editor(
-            df_tabla,
-            column_config={
-                "id": None,
-                "Tipo": st.column_config.TextColumn("Tipo", disabled=True),
-                "Activo": st.column_config.TextColumn("Activo", disabled=True),
-                "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
-                "Invertido (€)": st.column_config.NumberColumn("Invertido (€)", format="%.2f €", disabled=True),
-                "Valor Actual (€)": st.column_config.NumberColumn("Valor Actual (€)", format="%.2f €"),
-                "Ganancia (€)": st.column_config.NumberColumn("Ganancia (€)", format="%.2f €", disabled=True),
-                "Rentabilidad (%)": st.column_config.NumberColumn("Rentabilidad (%)", format="%.2f %%", disabled=True)
-            },
-            hide_index=True,
-            use_container_width=True,
-            key="editor_activos"
-        )
-        
-        if st.button("💾 Guardar Actualización de Valores en la BD", type="primary"):
-            for _, row in df_editado.iterrows():
-                actualizar_activo_db(row["id"], row["Valor Actual (€)"])
-            st.success("¡Valores actualizados correctamente!")
-            st.rerun()
+        if tabla:
+            df_tabla = pd.DataFrame(tabla)
             
-        st.divider()
-        st.markdown("### 🗑️ Eliminar Activo")
-        opciones_eliminar = {f"{row['Tipo']} - {row['Activo']} (ID: {row['id']})": row['id'] for row in tabla}
-        sel_eliminar = st.selectbox("Selecciona activo a borrar:", list(opciones_eliminar.keys()))
-        if st.button("❌ Borrar Activo Seleccionado", type="primary"):
-            eliminar_activo_db(opciones_eliminar[sel_eliminar])
-            st.rerun()
+            st.caption("💡 Puedes editar directamente el **Valor Actual (€)** de cualquier activo en la tabla y pulsar el botón inferior para guardarlo.")
+            
+            df_editado = st.data_editor(
+                df_tabla,
+                column_config={
+                    "id": None,
+                    "datos_originales": None,
+                    "Tipo": st.column_config.TextColumn("Tipo", disabled=True),
+                    "Activo": st.column_config.TextColumn("Activo", disabled=True),
+                    "Invertido (€)": st.column_config.NumberColumn("Invertido (€)", format="%.2f €", disabled=True),
+                    "Valor Actual (€)": st.column_config.NumberColumn("Valor Actual (€)", format="%.2f €"),
+                    "Ganancia (€)": st.column_config.NumberColumn("Ganancia (€)", format="%.2f €", disabled=True),
+                    "Rentabilidad (%)": st.column_config.NumberColumn("Rentabilidad (%)", format="%.2f %%", disabled=True)
+                },
+                hide_index=True,
+                use_container_width=True,
+                key="editor_activos"
+            )
+            
+            if st.button("💾 Guardar Actualización de Valores en la BD", type="primary"):
+                for _, row in df_editado.iterrows():
+                    p = row["datos_originales"]
+                    nuevo_val = row["Valor Actual (€)"]
+                    # Reconstruir concepto actualizado
+                    nuevo_concepto = f"{p[0]}|||{p[1]}|||{p[2]}|||{nuevo_val}|||{p[4]}"
+                    try:
+                        supabase.table("transacciones").update({"concepto": nuevo_concepto}).eq("id", row["id"]).execute()
+                    except Exception:
+                        pass
+                st.success("¡Valores actualizados correctamente!")
+                st.rerun()
+                
+            st.divider()
+            st.markdown("### 🗑️ Eliminar Activo")
+            opciones_eliminar = {f"{row['Tipo']} - {row['Activo']} (ID: {row['id']})": row['id'] for row in tabla}
+            sel_eliminar = st.selectbox("Selecciona activo a borrar:", list(opciones_eliminar.keys()))
+            if st.button("❌ Borrar Activo Seleccionado", type="primary"):
+                eliminar_registro_db(opciones_eliminar[sel_eliminar])
+                st.rerun()
     else:
         st.info("No hay inversiones ni cuentas remuneradas añadidas.")
 
@@ -463,7 +467,6 @@ with tab_ia:
                 
                 Para cada activo extrae:
                 - "tipo_activo": "Acción/ETF", "Fondo Indexado" o "Cuenta Remunerada".
-                - "ticker": El ticker bursátil si es acción (ej: AVAV, VRT, VKTX), el ISIN o número si es fondo, o "DEPOSITO" si es depósito.
                 - "nombre": Nombre descriptivo.
                 - "acciones": Número de acciones (si es acción, pon la cantidad exacta como decimal; si es fondo pon 1.0; si es depósito pon el capital).
                 - "precio_compra": Si es acción, pon el PRECIO TOTAL invertido en esa acción. Si es fondo, pon el CAPITAL INVERTIDO. Si es depósito, pon 1.0.
@@ -475,7 +478,6 @@ with tab_ia:
                   "items": [
                     {{
                       "tipo_activo": "...",
-                      "ticker": "...",
                       "nombre": "...",
                       "acciones": 0.0,
                       "precio_compra": 0.0,
@@ -521,10 +523,10 @@ with tab_ia:
                             p_c = p_c / acc
                         
                         if t_act == "Cuenta Remunerada" and v_man == 0.0:
-                            v_man = acc # Si no hay valor actual manual, el capital es el valor actual
+                            v_man = acc
                             
-                        agregar_activo_db(
-                            ticker=it.get("ticker", "MANUAL"),
+                        agregar_activo_seguro(
+                            ticker="MANUAL",
                             nombre=it.get("nombre", "Activo IA"),
                             acciones=acc,
                             precio_compra=p_c,
