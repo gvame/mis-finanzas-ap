@@ -3,7 +3,7 @@ import pandas as pd
 import yfinance as yf
 import requests
 import json
-from datetime import date, datetime
+from datetime import date
 from supabase import create_client, Client
 import io
 import time
@@ -139,7 +139,7 @@ def registrar_movimiento_db(concepto, monto, tipo):
     except Exception as e:
         st.error(f"Error al registrar movimiento: {e}")
 
-def agregar_activo_db(ticker, nombre, acciones, precio_compra, tipo_activo="Acción/ETF", fecha_inicio=None, interes_tae=0.0, valor_actual_manual=0.0):
+def agregar_activo_db(ticker, nombre, acciones, precio_compra, tipo_activo="Acción/ETF", valor_actual_manual=0.0):
     try:
         supabase.table("activos").insert({
             "ticker": str(ticker),
@@ -147,8 +147,6 @@ def agregar_activo_db(ticker, nombre, acciones, precio_compra, tipo_activo="Acci
             "acciones": float(acciones),
             "precio_compra": float(precio_compra),
             "tipo_activo": str(tipo_activo),
-            "fecha_inicio": str(fecha_inicio) if fecha_inicio else None,
-            "interes_tae": float(interes_tae),
             "valor_actual_manual": float(valor_actual_manual)
         }).execute()
     except Exception as err:
@@ -207,7 +205,6 @@ efectivo_disponible = efectivo_base_total + total_ingresos - total_gastos
 
 valor_portafolio_actual = 0.0
 total_invertido = 0.0
-hoy = date.today()
 
 for a in activos:
     acciones = float(a.get("acciones", 0))
@@ -216,32 +213,14 @@ for a in activos:
     ticker = a.get("ticker", "")
     val_manual = float(a.get("valor_actual_manual", 0.0))
     
-    # Cálculo de Inversión Inicial (Capital puesto)
     if tipo_act in ["Depósito", "Cuenta Remunerada", "Efectivo"]:
         inv = acciones
+        val = val_manual if val_manual > 0 else inv
     elif tipo_act == "Fondo Indexado":
-        inv = p_compra  # Guardamos el capital invertido en precio_compra para fondos
-    else:
-        inv = acciones * p_compra
-    
-    # Cálculo de Valor Actual
-    if tipo_act in ["Depósito", "Cuenta Remunerada"]:
-        capital = acciones
-        tae = float(a.get("interes_tae", 0.0)) / 100.0
-        f_ini_str = a.get("fecha_inicio")
-        ganancia_dep = 0.0
-        if f_ini_str:
-            try:
-                f_ini = datetime.strptime(str(f_ini_str).split()[0], "%Y-%m-%d").date()
-                dias_transcurridos = max(0, (hoy - f_ini).days)
-                ganancia_dep = capital * (tae * (dias_transcurridos / 365.0))
-            except Exception:
-                pass
-        val = capital + ganancia_dep
-        inv = capital
-    elif tipo_act == "Fondo Indexado":
+        inv = p_compra
         val = val_manual if val_manual > 0 else inv
     else:
+        inv = acciones * p_compra
         p_actual = obtener_precio_eur(ticker) if ticker and ticker not in ["MANUAL", "CUENTA"] else 0
         if p_actual and p_actual > 0:
             val = acciones * p_actual
@@ -333,100 +312,51 @@ with tab_gastos:
 with tab_inversiones:
     st.subheader("🏢 Inversiones, Fondos y Cuentas Remuneradas")
     
-    opcion_carga = st.selectbox("Método de incorporación:", ["➕ Añadir Individualmente", "📁 Importación Masiva (Excel / CSV)"])
-    st.divider()
+    tipo_seleccionado = st.radio("Tipo de activo o cuenta:", ["Acción / ETF", "Fondo Indexado", "Cuenta Remunerada / Depósito"], horizontal=True)
+    st.write("")
     
-    if opcion_carga == "📁 Importación Masiva (Excel / CSV)":
-        st.markdown("### 📥 Sube tu cartera de golpe")
-        df_plantilla = pd.DataFrame([
-            {"tipo_activo": "Acción/ETF", "ticker": "AVAV", "nombre": "AeroVironment", "acciones": 0.655073, "precio_compra": 124.60, "valor_actual_manual": 0.0, "interes_tae": 0.0},
-            {"tipo_activo": "Fondo Indexado", "ticker": "40068337561", "nombre": "Fondo S&P 500", "acciones": 1.0, "precio_compra": 1631.09, "valor_actual_manual": 1797.24, "interes_tae": 0.0},
-            {"tipo_activo": "Cuenta Remunerada", "ticker": "DEPOSITO", "nombre": "Depósito bancario", "acciones": 1239.54, "precio_compra": 1.0, "valor_actual_manual": 0.0, "interes_tae": 2.5}
-        ])
-        
-        buffer = io.BytesIO()
-        df_plantilla.to_excel(buffer, index=False)
-        buffer.seek(0)
-        
-        st.download_button(
-            label="⬇️ Descargar Plantilla de Ejemplo (.xlsx)",
-            data=buffer,
-            file_name="plantilla_inversiones.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        
-        archivo_subido = st.file_uploader("Sube tu archivo completado:", type=["xlsx", "csv"])
-        if archivo_subido is not None:
-            try:
-                if archivo_subido.name.endswith('.csv'):
-                    df_subida = pd.read_csv(archivo_subido)
-                else:
-                    df_subida = pd.read_excel(archivo_subido)
+    if tipo_seleccionado == "Acción / ETF":
+        busqueda = st.text_input("Buscar Acción o ETF (ej: AVAV, VRT, VKTX):", value="AVAV")
+        if busqueda:
+            opciones = buscar_coincidencias(busqueda)
+            if opciones:
+                dict_opciones = {f"{item['name']} ({item['symbol']}) - {item['exchange']}": item for item in opciones}
+                seleccion = st.selectbox("Selecciona activo:", list(dict_opciones.keys()))
+                activo_elegido = dict_opciones[seleccion]
                 
-                if st.button("🚀 Procesar e Insertar en Supabase", type="primary"):
-                    for _, row in df_subida.iterrows():
-                        agregar_activo_db(
-                            ticker=str(row.get("ticker", "MANUAL")),
-                            nombre=str(row.get("nombre", "Activo")),
-                            acciones=float(row.get("acciones", 1.0)),
-                            precio_compra=float(row.get("precio_compra", 0.0)),
-                            tipo_activo=str(row.get("tipo_activo", "Acción/ETF")),
-                            interes_tae=float(row.get("interes_tae", 0.0)),
-                            valor_actual_manual=float(row.get("valor_actual_manual", 0.0))
-                        )
-                    st.success("¡Importación masiva completada con éxito!")
+                c_acc, c_prec = st.columns(2)
+                with c_acc:
+                    num_acc = st.number_input("Nº Acciones:", min_value=0.000001, value=1.0, format="%.6f")
+                with c_prec:
+                    prec_c = st.number_input("Precio compra total (€):", min_value=0.0, value=100.0)
+                    
+                if st.button("Añadir Acción/ETF", use_container_width=True):
+                    precio_unitario = prec_c / num_acc if num_acc > 0 else 0
+                    agregar_activo_db(activo_elegido["symbol"], activo_elegido["name"], num_acc, precio_unitario, "Acción/ETF")
+                    st.success("Acción añadida correctamente.")
                     st.rerun()
-            except Exception as e:
-                st.error(f"Error al leer el archivo: {e}")
+
+    elif tipo_seleccionado == "Fondo Indexado":
+        f_nombre = st.text_input("Nombre del Fondo o ISIN:", value="Fondo S&P 500 (40068337561)")
+        c_inv, c_act = st.columns(2)
+        with c_inv:
+            total_invertido_input = st.number_input("Total Invertido (€):", min_value=0.0, value=1631.09)
+        with c_act:
+            total_actual_input = st.number_input("Valor Actual Total (€):", min_value=0.0, value=1797.24)
+            
+        if st.button("Añadir Fondo Indexado", use_container_width=True):
+            agregar_activo_db("40068337561", f_nombre, 1.0, total_invertido_input, "Fondo Indexado", valor_actual_manual=total_actual_input)
+            st.success("Fondo indexado añadido correctamente.")
+            st.rerun()
 
     else:
-        tipo_seleccionado = st.radio("Tipo de activo o cuenta:", ["Acción / ETF", "Fondo Indexado", "Cuenta Remunerada / Depósito"], horizontal=True)
-        st.write("")
-        
-        if tipo_seleccionado == "Acción / ETF":
-            busqueda = st.text_input("Buscar Acción o ETF (ej: AVAV, VRT, VKTX):", value="AVAV")
-            if busqueda:
-                opciones = buscar_coincidencias(busqueda)
-                if opciones:
-                    dict_opciones = {f"{item['name']} ({item['symbol']}) - {item['exchange']}": item for item in opciones}
-                    seleccion = st.selectbox("Selecciona activo:", list(dict_opciones.keys()))
-                    activo_elegido = dict_opciones[seleccion]
-                    
-                    c_acc, c_prec = st.columns(2)
-                    with c_acc:
-                        num_acc = st.number_input("Nº Acciones:", min_value=0.000001, value=1.0, format="%.6f")
-                    with c_prec:
-                        prec_c = st.number_input("Precio compra total (€):", min_value=0.0, value=100.0)
-                        
-                    if st.button("Añadir Acción/ETF", use_container_width=True):
-                        precio_unitario = prec_c / num_acc if num_acc > 0 else 0
-                        agregar_activo_db(activo_elegido["symbol"], activo_elegido["name"], num_acc, precio_unitario, "Acción/ETF")
-                        st.success("Acción añadida correctamente.")
-                        st.rerun()
-
-        elif tipo_seleccionado == "Fondo Indexado":
-            f_nombre = st.text_input("Nombre del Fondo o ISIN:", value="Fondo S&P 500 (40068337561)")
-            c_inv, c_act = st.columns(2)
-            with c_inv:
-                total_invertido_input = st.number_input("Total Invertido (€):", min_value=0.0, value=1631.09)
-            with c_act:
-                total_actual_input = st.number_input("Valor Actual Total (€):", min_value=0.0, value=1797.24)
-                
-            if st.button("Añadir Fondo Indexado", use_container_width=True):
-                agregar_activo_db("40068337561", f_nombre, 1.0, total_invertido_input, "Fondo Indexado", valor_actual_manual=total_actual_input)
-                st.success("Fondo indexado añadido correctamente.")
-                st.rerun()
-
-        else:
-            cr_nombre = st.text_input("Nombre del Depósito:", value="Depósito bancario")
-            cr_capital = st.number_input("Capital Depositado (€):", min_value=0.0, value=1239.54)
-            cr_tae = st.number_input("Interés Anual (% TAE):", min_value=0.0, value=2.5)
-            f_inicio = st.date_input("Fecha Inicio de Depósito:", value=date.today())
-                
-            if st.button("Añadir Depósito / Cuenta Remunerada", use_container_width=True):
-                agregar_activo_db("DEPOSITO", cr_nombre, cr_capital, 1.0, "Cuenta Remunerada", fecha_inicio=f_inicio, interes_tae=cr_tae)
-                st.success("Depósito añadido correctamente.")
-                st.rerun()
+        cr_nombre = st.text_input("Nombre del Depósito:", value="Depósito bancario")
+        cr_capital = st.number_input("Capital Depositado / Valor Actual (€):", min_value=0.0, value=1239.54)
+            
+        if st.button("Añadir Depósito / Cuenta Remunerada", use_container_width=True):
+            agregar_activo_db("DEPOSITO", cr_nombre, cr_capital, 1.0, "Cuenta Remunerada", valor_actual_manual=cr_capital)
+            st.success("Depósito añadido correctamente.")
+            st.rerun()
 
     st.divider()
     st.subheader("📋 Detalle, Cotización y Edición de Activos")
@@ -444,18 +374,7 @@ with tab_inversiones:
             
             if tipo_act in ["Depósito", "Cuenta Remunerada"]:
                 inv = acciones
-                capital = acciones
-                tae = float(item.get("interes_tae", 0.0)) / 100.0
-                f_ini_str = item.get("fecha_inicio")
-                ganancia_dep = 0.0
-                if f_ini_str:
-                    try:
-                        f_ini = datetime.strptime(str(f_ini_str).split()[0], "%Y-%m-%d").date()
-                        dias_transcurridos = max(0, (hoy - f_ini).days)
-                        ganancia_dep = capital * (tae * (dias_transcurridos / 365.0))
-                    except Exception:
-                        pass
-                val = capital + ganancia_dep
+                val = val_manual if val_manual > 0 else inv
             elif tipo_act == "Fondo Indexado":
                 inv = p_compra
                 val = val_manual if val_manual > 0 else inv
@@ -548,8 +467,7 @@ with tab_ia:
                 - "nombre": Nombre descriptivo.
                 - "acciones": Número de acciones (si es acción, pon la cantidad exacta como decimal; si es fondo pon 1.0; si es depósito pon el capital).
                 - "precio_compra": Si es acción, pon el PRECIO TOTAL invertido en esa acción. Si es fondo, pon el CAPITAL INVERTIDO. Si es depósito, pon 1.0.
-                - "valor_actual_manual": Si se indica un valor actual de mercado (como en el fondo), ponlo aquí. Si no, pon 0.0.
-                - "interes_tae": Si es depósito, pon el porcentaje de TAE (ej: 2.5). Si no, 0.0.
+                - "valor_actual_manual": Si se indica un valor actual de mercado (como en el fondo o depósito), ponlo aquí. Si no, pon 0.0.
                 
                 Responde ÚNICAMENTE con un JSON puro (sin bloques de código markdown ```json) con esta estructura exacta:
                 {{
@@ -561,8 +479,7 @@ with tab_ia:
                       "nombre": "...",
                       "acciones": 0.0,
                       "precio_compra": 0.0,
-                      "valor_actual_manual": 0.0,
-                      "interes_tae": 0.0
+                      "valor_actual_manual": 0.0
                     }}
                   ]
                 }}
@@ -598,9 +515,13 @@ with tab_ia:
                         t_act = it.get("tipo_activo", "Acción/ETF")
                         acc = float(it.get("acciones", 1.0))
                         p_c = float(it.get("precio_compra", 0.0))
+                        v_man = float(it.get("valor_actual_manual", 0.0))
                         
                         if t_act == "Acción/ETF" and acc > 0:
                             p_c = p_c / acc
+                        
+                        if t_act == "Cuenta Remunerada" and v_man == 0.0:
+                            v_man = acc # Si no hay valor actual manual, el capital es el valor actual
                             
                         agregar_activo_db(
                             ticker=it.get("ticker", "MANUAL"),
@@ -608,9 +529,7 @@ with tab_ia:
                             acciones=acc,
                             precio_compra=p_c,
                             tipo_activo=t_act,
-                            fecha_inicio=date.today() if t_act == "Cuenta Remunerada" else None,
-                            interes_tae=float(it.get("interes_tae", 0.0)),
-                            valor_actual_manual=float(it.get("valor_actual_manual", 0.0))
+                            valor_actual_manual=v_man
                         )
                     st.success(f"¡IA: Inversiones interpretadas y añadidas con éxito!")
                 else:
