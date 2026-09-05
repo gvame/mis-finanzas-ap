@@ -38,13 +38,41 @@ except Exception as e:
     st.error(f"Error al conectar con Supabase: {e}")
     st.stop()
 
-# --- BARRA LATERAL / CERRAR SESIÓN ---
+# --- BARRA LATERAL / CERRAR SESIÓN Y ZONA DE PELIGRO ---
 with st.sidebar:
     st.write("👤 **Sesión Activa**")
     if st.button("🔒 Cerrar Sesión"):
         st.session_state.autenticado = False
         st.rerun()
     st.divider()
+    
+    st.markdown("### ⚠️ Zona de Peligro")
+    if "confirmar_borrado_total" not in st.session_state:
+        st.session_state.confirmar_borrado_total = False
+
+    if not st.session_state.confirmar_borrado_total:
+        if st.button("🗑️ Borrar Todos los Datos", type="secondary", use_container_width=True):
+            st.session_state.confirmar_borrado_total = True
+            st.rerun()
+    else:
+        st.error("¿Estás 100% seguro? Se borrarán todas las transacciones y activos de la base de datos.")
+        col_b1, col_b2 = st.columns(2)
+        with col_b1:
+            if st.button("Sí, borrar todo", type="primary", use_container_width=True):
+                try:
+                    # Borrar tablas de Supabase
+                    supabase.table("transacciones").delete().neq("id", 0).execute()
+                    supabase.table("activos").delete().neq("id", 0).execute()
+                    st.success("¡Base de datos restablecida por completo!")
+                    st.session_state.confirmar_borrado_total = False
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al borrar los datos: {e}")
+        with col_b2:
+            if st.button("Cancelar", use_container_width=True):
+                st.session_state.confirmar_borrado_total = False
+                st.rerun()
 
 # --- FUNCIONES DE BASE DE DATOS ---
 def cargar_transacciones():
