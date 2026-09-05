@@ -44,21 +44,25 @@ with st.sidebar:
         st.rerun()
     st.divider()
 
-# --- FUNCIONES DE BASE DE DATOS (SUPABASE) ---
+# --- FUNCIONES DE BASE DE DATOS (SEGURAS CONTRA PGRST125) ---
 def cargar_balance_base():
     try:
-        res = supabase.table("configuracion").select("valor").eq("clave", "balance_base").execute()
-        if res.data and len(res.data) > 0:
-            return float(res.data[0]["valor"])
+        # Seleccionamos todos los registros y tomamos el último valor insertado
+        res = supabase.table("configuracion").select("*").execute()
+        if res.data:
+            # Buscar si hay alguno con clave 'balance_base'
+            for row in reversed(res.data):
+                if row.get("clave") == "balance_base":
+                    return float(row.get("valor", 0.0))
+            # Si no encuentra la clave pero hay datos, toma el último valor genérico
+            return float(res.data[-1].get("valor", 0.0))
     except Exception:
         pass
     return 0.0
 
 def actualizar_balance_base(nuevo_monto):
     try:
-        # 1. Intentamos eliminar el registro anterior si existe
-        supabase.table("configuracion").delete().eq("clave", "balance_base").execute()
-        # 2. Insertamos la nueva fila limpia
+        # Método seguro: Insertar un nuevo registro de configuración sin requerir claves primarias restrictivas
         supabase.table("configuracion").insert({
             "clave": "balance_base",
             "valor": float(nuevo_monto)
@@ -69,14 +73,10 @@ def actualizar_balance_base(nuevo_monto):
 
 def cargar_transacciones():
     try:
-        res = supabase.table("transacciones").select("*").order("created_at", desc=True).execute()
+        res = supabase.table("transacciones").select("*").execute()
         return res.data or []
     except Exception:
-        try:
-            res = supabase.table("transacciones").select("*").execute()
-            return res.data or []
-        except Exception:
-            return []
+        return []
 
 def cargar_activos():
     try:
@@ -359,7 +359,7 @@ with tab_ia:
                     actualizar_balance_base(data["monto"])
                     st.success(f"IA: Saldo base actualizado a {data['monto']} €.")
                 else:
-                    st.info(data.get("respuesta"))
+                    st.info(data.get(value=""))
                     
                 st.rerun()
             except Exception as e:
