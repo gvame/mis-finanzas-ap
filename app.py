@@ -3,7 +3,6 @@ import pandas as pd
 import yfinance as yf
 import requests
 import json
-import plotly.express as px
 from datetime import date, datetime
 from supabase import create_client, Client
 import io
@@ -88,6 +87,13 @@ def cargar_activos():
     except Exception:
         return []
 
+def eliminar_activo_db(activo_id):
+    try:
+        supabase.table("activos").delete().eq("id", activo_id).execute()
+        st.success("Activo eliminado correctamente.")
+    except Exception as e:
+        st.error(f"Error al eliminar activo: {e}")
+
 def registrar_movimiento_db(concepto, monto, tipo):
     try:
         supabase.table("transacciones").insert({
@@ -99,7 +105,6 @@ def registrar_movimiento_db(concepto, monto, tipo):
         st.error(f"Error al registrar movimiento: {e}")
 
 def agregar_activo_db(ticker, nombre, acciones, precio_compra, tipo_activo="Acción/ETF", fecha_inicio=None, fecha_fin=None, interes_tae=0.0):
-    # Intentar inserción completa con todas las columnas avanzadas
     try:
         supabase.table("activos").insert({
             "ticker": ticker,
@@ -112,7 +117,6 @@ def agregar_activo_db(ticker, nombre, acciones, precio_compra, tipo_activo="Acci
             "interes_tae": float(interes_tae)
         }).execute()
     except Exception:
-        # Si falla por falta de columnas en Supabase, intentamos insertar solo las básicas
         try:
             supabase.table("activos").insert({
                 "ticker": ticker,
@@ -194,6 +198,7 @@ for a in activos:
             except Exception:
                 pass
         val = capital + ganancia_dep
+        inv = capital
     elif tipo_act == "Fondo Indexado":
         ticker = a.get("ticker", "")
         p_actual = obtener_precio_eur(ticker) if ticker and ticker != "FONDO_MANUAL" else p_compra
@@ -365,9 +370,7 @@ with tab_inversiones:
                 opciones_fondo = buscar_coincidencias(f_busqueda)
                 if opciones_fondo:
                     dict_f = {f"{item['name']} ({item['symbol']})": item for item in opciones_fondo}
-                    sel_f = st.selectbox("Selecciona fondo:", list(dict_f.keys()))
-                    f_ticker_final = dict_f[sel_f]["symbol"]
-                    f_nombre_final = dict_f[sel_f]["name"]
+                    f_ticker_final = dict_f[sel_f]["symbol"] if 'sel_f' in locals() else "FONDO_MANUAL"
                     
             c_part, c_vl = st.columns(2)
             with c_part:
@@ -381,21 +384,23 @@ with tab_inversiones:
                 st.rerun()
 
         else:
-            cr_nombre = st.text_input("Nombre (ej. Trade Republic o Cuenta Naranja):", value="Trade Republic Remunerada")
-            cr_capital = st.number_input("Capital Remunerado (€):", min_value=0.0, value=3000.0)
-            cr_tae = st.number_input("Interés Anual (% TAE):", min_value=0.0, value=3.04)
-            f_inicio = st.date_input("Fecha Inicio de Cómputo:", value=date.today())
+            cr_nombre = st.text_input("Nombre (ej. Depósito Bancario):", value="Depósito Bancario")
+            cr_capital = st.number_input("Capital Depositado (€):", min_value=0.0, value=1000.0)
+            cr_tae = st.number_input("Interés Anual (% TAE):", min_value=0.0, value=3.0)
+            f_inicio = st.date_input("Fecha Inicio de Depósito:", value=date.today())
                 
-            if st.button("Añadir Cuenta Remunerada", use_container_width=True):
-                agregar_activo_db("CUENTA_REM", cr_nombre, cr_capital, 1.0, "Cuenta Remunerada", fecha_inicio=f_inicio, interes_tae=cr_tae)
-                st.success("Cuenta remunerada añadida correctamente.")
+            if st.button("Añadir Depósito / Cuenta Remunerada", use_container_width=True):
+                agregar_activo_db("DEPOSITO", cr_nombre, cr_capital, 1.0, "Cuenta Remunerada", fecha_inicio=f_inicio, interes_tae=cr_tae)
+                st.success("Depósito añadido correctamente.")
                 st.rerun()
 
     st.divider()
+    st.subheader("📋 Detalle y Gestión de Activos")
     
     if activos:
         tabla = []
         for item in activos:
+            act_id = item.get("id")
             p_compra = float(item.get("precio_compra", 0))
             acciones = float(item.get("acciones", 0))
             ticker = item.get("ticker", "")
@@ -435,15 +440,24 @@ with tab_inversiones:
             rentabilidad_html = f'<span style="{color_estilo}">{txt_rent}</span>'
             
             tabla.append({
+                "id": act_id,
                 "Tipo": tipo_act,
                 "Activo": nombre,
-                "Capital/Inv (€)": f"{inv:,.2f}",
+                "Invertido (€)": f"{inv:,.2f}",
                 "Valor Actual (€)": f"{val:,.2f}",
-                "Ganancia Generada": rentabilidad_html
+                "Ganancia": rentabilidad_html
             })
             
         df_tabla = pd.DataFrame(tabla)
-        st.markdown(df_tabla.to_html(escape=False, index=False), unsafe_allow_html=True)
+        st.markdown(df_tabla.drop(columns=["id"]).to_html(escape=False, index=False), unsafe_allow_html=True)
+        
+        st.write("")
+        st.markdown("### 🗑️ Eliminar Activo Erróneo")
+        opciones_eliminar = {f"{row['Tipo']} - {row['Activo']} (ID: {row['id']})": row['id'] for row in tabla}
+        sel_eliminar = st.selectbox("Selecciona activo a borrar si está mal introducido:", list(opciones_eliminar.keys()))
+        if st.button("❌ Borrar Activo Seleccionado", type="primary"):
+            eliminar_activo_db(opciones_eliminar[sel_eliminar])
+            st.rerun()
     else:
         st.info("No hay inversiones ni cuentas remuneradas añadidas.")
 
@@ -452,10 +466,10 @@ with tab_inversiones:
 # ==========================================
 with tab_ia:
     st.subheader("🤖 Asistente IA Multicuenta Inteligente")
-    st.caption("Escribe de forma natural sobre tus cuentas o inversiones, y la IA lo organizará.")
+    st.caption("Escribe de forma natural indicando si es un depósito, cuenta remunerada o acción/ETF con su TAE y fecha.")
     
     api_key = st.secrets.get("GEMINI_API_KEY", "")
-    instruccion = st.text_area("Cuéntale a la IA tu estado financiero:", placeholder="Ejemplo: Tengo 1200 euros en la Cuenta Nómina, 8000 euros en la Cuenta Naranja al 1% de TAE, y 5000 euros en Trade Republic al 3.04%...")
+    instruccion = st.text_area("Cuéntale a la IA tu inversión o depósito:", placeholder="Ejemplo: Añade un depósito de 1239.54 euros llamado Depósito Bancario 4 Meses con un TAE del 3% iniciado el 2026-01-01. Y también 10 acciones de S&P 500 compradas a 163.10 euros.")
     
     if st.button("Ejecutar con IA", use_container_width=True) and instruccion:
         if not api_key:
@@ -466,30 +480,23 @@ with tab_ia:
                 client = genai.Client(api_key=api_key)
                 
                 prompt_ia = f"""
-                Eres el motor ejecutor y experto financiero de una app. Analiza la petición: '{instruccion}'.
-                Responde ÚNICAMENTE con un JSON puro (sin bloques de código markdown) con esta estructura:
+                Eres el motor experto financiero de una app. Analiza detalladamente la petición del usuario: '{instruccion}'.
                 
-                Si actualiza saldos de cuentas corrientes principales:
-                {{
-                  "accion": "cuentas_banco",
-                  "actualizaciones": [
-                    {{"cuenta": "Cuenta Nómina" o "Cuenta Naranja" or "Trade Republic", "monto": 0.0}}
-                  ]
-                }}
+                Clasifica correctamente cada elemento:
+                - Si es un depósito, cuenta remunerada o ahorros a plazo con TAE, usa tipo_activo: "Cuenta Remunerada", pon el capital como "acciones" (ej: 1239.54), precio_compra: 1.0, introduce la fecha de inicio ("fecha_inicio" en formato YYYY-MM-DD o la fecha actual si no se especifica) y el "interes_tae".
+                - Si es una acción o ETF (como S&P 500, Apple, etc.), usa tipo_activo: "Acción/ETF", el número de acciones en "acciones", el precio unitario de compra en "precio_compra" y ticker si lo conoces (o "MANUAL").
                 
-                Si es un movimiento de gasto/ingreso:
-                {{"accion": "movimiento", "concepto": "...", "monto": 0.0, "tipo": "Gasto" or "Ingreso"}}
-                
-                Si es para añadir inversiones o cuentas remuneradas de ahorro:
+                Responde ÚNICAMENTE con un JSON puro (sin bloques de código markdown) con esta estructura exacta:
                 {{
                   "accion": "inversion",
                   "items": [
                     {{
-                      "tipo_activo": "Acción/ETF" o "Fondo Indexado" o "Cuenta Remunerada",
-                      "ticker": "Ticker si aplica o MANUAL",
-                      "nombre": "Nombre descriptivo",
-                      "acciones": capital_o_acciones,
-                      "precio_compra": 1.0,
+                      "tipo_activo": "Cuenta Remunerada" o "Acción/ETF" o "Fondo Indexado",
+                      "ticker": "...",
+                      "nombre": "...",
+                      "acciones": 0.0,
+                      "precio_compra": 0.0,
+                      "fecha_inicio": "YYYY-MM-DD o null",
                       "interes_tae": 0.0
                     }}
                   ]
@@ -504,26 +511,19 @@ with tab_ia:
                 texto_limpio = res.text.replace("```json", "").replace("```", "").strip()
                 data = json.loads(texto_limpio)
                 
-                accion = data.get("accion")
-                if accion == "cuentas_banco":
-                    for act in data.get("actualizaciones", []):
-                        actualizar_saldo_cuenta(act["cuenta"], act["monto"])
-                    st.success("¡IA: Saldos de cuentas bancarias actualizados con éxito!")
-                elif accion == "movimiento":
-                    registrar_movimiento_db(data["concepto"], data["monto"], data["tipo"])
-                    st.success(f"IA: Registrado {data['tipo']} de {data['monto']} €.")
-                elif accion == "inversion":
+                if data.get("accion") == "inversion":
                     items = data.get("items", [])
                     for it in items:
                         agregar_activo_db(
                             ticker=it.get("ticker", "MANUAL"),
                             nombre=it.get("nombre", "Activo"),
                             acciones=float(it.get("acciones", 0)),
-                            precio_compra=float(it.get("precio_compra", 0)),
+                            precio_compra=float(it.get("precio_compra", 1.0)),
                             tipo_activo=it.get("tipo_activo", "Acción/ETF"),
+                            fecha_inicio=it.get("fecha_inicio"),
                             interes_tae=float(it.get("interes_tae", 0.0))
                         )
-                    st.success(f"¡IA: Se han añadido {len(items)} elementos al portafolio!")
+                    st.success(f"¡IA: Se han añadido {len(items)} elementos correctamente!")
                 else:
                     st.info("Instrucción procesada.")
                     
