@@ -503,10 +503,24 @@ with tab_ia:
                 }}
                 """
                 
-                res = client.models.generate_content(
-                    model="gemini-3.6-flash",
-                    contents=prompt_ia
-                )
+                # Sistema de respaldo automático entre modelos si ocurre un 503 por alta demanda
+                modelos_a_probar = ["gemini-2.5-flash", "gemini-3.6-flash"]
+                res = None
+                ultimo_error = None
+                
+                for mod in modelos_a_probar:
+                    try:
+                        res = client.models.generate_content(
+                            model=mod,
+                            contents=prompt_ia
+                        )
+                        break
+                    except Exception as err:
+                        ultimo_error = err
+                        continue
+                
+                if res is None:
+                    raise Exception(f"Los servidores de IA están ocupados temporalmente. Detalle: {ultimo_error}")
                 
                 texto_limpio = res.text.replace("```json", "").replace("```", "").strip()
                 data = json.loads(texto_limpio)
