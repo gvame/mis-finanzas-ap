@@ -27,11 +27,10 @@ if not st.session_state.autenticado:
             st.error("Contraseña incorrecta.")
     st.stop()
 
-# --- CONEXIÓN A SUPABASE (Forzando esquema público) ---
+# --- CONEXIÓN A SUPABASE ---
 try:
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-    # Inicialización estándar y segura del cliente
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 except Exception as e:
     st.error(f"Error al conectar con Supabase: {e}")
@@ -45,49 +44,43 @@ with st.sidebar:
         st.rerun()
     st.divider()
 
-# --- FUNCIONES DE BASE DE DATOS (Con manejo de errores seguro) ---
+# --- FUNCIONES DE BASE DE DATOS (Con trazabilidad de errores) ---
 def cargar_transacciones():
     try:
-        # Forzamos la cabecera y el esquema público de forma explícita si fuera necesario
         res = supabase.table("transacciones").select("*").execute()
         return res.data or []
     except Exception as e:
-        # Si hay error de ruta, devolvemos lista vacía para no tumbar la app
+        st.error(f"Error al cargar transacciones: {e}")
         return []
 
 def cargar_balance_base():
-    try:
-        transacciones = cargar_transacciones()
-        for t in reversed(transacciones):
-            if t.get("concepto") == "SALDO_INICIAL":
-                return float(t.get("monto", 0.0))
-    except Exception:
-        pass
+    transacciones = cargar_transacciones()
+    for t in reversed(transacciones):
+        if t.get("concepto") == "SALDO_INICIAL":
+            return float(t.get("monto", 0.0))
     return 0.0
 
 def actualizar_balance_base(nuevo_monto):
     try:
-        # Intentamos borrar el saldo inicial previo
+        # Borrar saldo inicial previo
         supabase.table("transacciones").delete().eq("concepto", "SALDO_INICIAL").execute()
-    except Exception:
-        pass
         
-    try:
-        # Insertamos el nuevo saldo inicial
+        # Insertar nuevo saldo inicial
         supabase.table("transacciones").insert({
             "concepto": "SALDO_INICIAL",
             "monto": float(nuevo_monto),
             "tipo": "Config"
         }).execute()
-        st.success("Saldo base actualizado correctamente.")
+        st.success("¡Capital base actualizado correctamente en la base de datos!")
     except Exception as e:
-        st.error(f"Error al actualizar balance base en Supabase: {e}")
+        st.error(f"Error detallado al actualizar saldo base: {e}")
 
 def cargar_activos():
     try:
         res = supabase.table("activos").select("*").execute()
         return res.data or []
-    except Exception:
+    except Exception as e:
+        st.error(f"Error al cargar activos: {e}")
         return []
 
 def registrar_movimiento_db(concepto, monto, tipo):
@@ -166,13 +159,13 @@ for a in activos:
     total_invertido += inv
     valor_portafolio_actual += val
 
-patrimonio_total = efectivo_disponible + valor_portafolio_actual
+capital_total = efectivo_disponible + valor_portafolio_actual
 
 # --- INTERFAZ / PANEL SUPERIOR ---
 st.title("💰 Copiloto Financiero & Portafolio")
 
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Patrimonio Total", f"{patrimonio_total:,.2f} €")
+m1.metric("Capital Total", f"{capital_total:,.2f} €")
 m2.metric("Efectivo Libre", f"{efectivo_disponible:,.2f} €")
 m3.metric("Valor Inversiones", f"{valor_portafolio_actual:,.2f} €")
 ganancia_portafolio = valor_portafolio_actual - total_invertido
@@ -189,16 +182,16 @@ tab_cuenta, tab_gastos, tab_portafolio, tab_ia = st.tabs([
 # 1. CUENTA BASE (EFECTIVO INICIAL)
 # ==========================================
 with tab_cuenta:
-    st.subheader("⚙️ Configuración del Balance Base")
-    st.caption("Introduce el saldo de partida en tu cuenta bancaria (sin incluir gastos/ingresos registrados ni inversiones).")
+    st.subheader("⚙️ Configuración del Capital Inicial")
+    st.caption("Introduce el saldo de partida en tu cuenta bancaria para fijar el efectivo base.")
     
     col_bal1, col_bal2 = st.columns([2, 1])
     with col_bal1:
-        nuevo_balance = st.number_input("Saldo Base de la Cuenta (€):", value=balance_base, min_value=0.0, step=100.0)
+        nuevo_balance = st.number_input("Capital Inicial de la Cuenta (€):", value=balance_base, min_value=0.0, step=100.0)
     with col_bal2:
         st.write("")
         st.write("")
-        if st.button("Actualizar Saldo Base", use_container_width=True):
+        if st.button("Actualizar Capital Inicial", use_container_width=True):
             actualizar_balance_base(nuevo_balance)
             st.rerun()
 
@@ -296,7 +289,7 @@ with tab_portafolio:
             st.plotly_chart(fig_pie, use_container_width=True)
             
         with col_g2:
-            st.markdown("**Patrimonio: Efectivo vs Inversiones**")
+            st.markdown("**Capital: Efectivo vs Inversiones**")
             df_patrimonio = pd.DataFrame([
                 {"Tipo": "Efectivo Libre", "Monto": efectivo_disponible},
                 {"Tipo": "Inversiones", "Monto": valor_portafolio_actual}
@@ -311,7 +304,7 @@ with tab_portafolio:
 # ==========================================
 with tab_ia:
     st.subheader("🤖 Pídele a la IA que gestione tu app")
-    st.caption("Ejemplos: 'Apunta un gasto de 40 euros en supermercado', 'Añade 2 acciones de Apple a 180 euros' o 'Establece mi saldo base en 3000 euros'.")
+    st.caption("Ejemplos: 'Apunta un gasto de 40 euros en supermercado', 'Añade 2 acciones de Apple a 180 euros' o 'Establece mi capital inicial en 3000 euros'.")
     
     api_key = st.secrets.get("GEMINI_API_KEY", "")
     instruccion = st.text_area("Instrucción para la IA:")
@@ -363,7 +356,7 @@ with tab_ia:
                         st.error(f"IA: No se encontró la empresa {data['empresa']}.")
                 elif data.get("accion") == "saldo_base":
                     actualizar_balance_base(data["monto"])
-                    st.success(f"IA: Saldo base actualizado a {data['monto']} €.")
+                    st.success(f"IA: Capital inicial actualizado a {data['monto']} €.")
                 else:
                     st.info(data.get("respuesta", ""))
                     
