@@ -139,7 +139,7 @@ def registrar_movimiento_db(concepto, monto, tipo):
     except Exception as e:
         st.error(f"Error al registrar movimiento: {e}")
 
-def agregar_activo_db(ticker, nombre, acciones, precio_compra, tipo_activo="Acción/ETF", fecha_inicio=None, fecha_fin=None, interes_tae=0.0, valor_actual_manual=0.0):
+def agregar_activo_db(ticker, nombre, acciones, precio_compra, tipo_activo="Acción/ETF", fecha_inicio=None, interes_tae=0.0, valor_actual_manual=0.0):
     try:
         supabase.table("activos").insert({
             "ticker": str(ticker),
@@ -148,7 +148,6 @@ def agregar_activo_db(ticker, nombre, acciones, precio_compra, tipo_activo="Acci
             "precio_compra": float(precio_compra),
             "tipo_activo": str(tipo_activo),
             "fecha_inicio": str(fecha_inicio) if fecha_inicio else None,
-            "fecha_fin": str(fecha_fin) if fecha_fin else None,
             "interes_tae": float(interes_tae),
             "valor_actual_manual": float(valor_actual_manual)
         }).execute()
@@ -400,7 +399,6 @@ with tab_inversiones:
                         prec_c = st.number_input("Precio compra total (€):", min_value=0.0, value=100.0)
                         
                     if st.button("Añadir Acción/ETF", use_container_width=True):
-                        # precio_compra unitario se calcula dividiendo el total invertido entre las acciones
                         precio_unitario = prec_c / num_acc if num_acc > 0 else 0
                         agregar_activo_db(activo_elegido["symbol"], activo_elegido["name"], num_acc, precio_unitario, "Acción/ETF")
                         st.success("Acción añadida correctamente.")
@@ -444,7 +442,6 @@ with tab_inversiones:
             tipo_act = item.get("tipo_activo", "Acción/ETF")
             val_manual = float(item.get("valor_actual_manual", 0.0))
             
-            # Cálculo de Inversión Inicial y Valor Actual según tipo
             if tipo_act in ["Depósito", "Cuenta Remunerada"]:
                 inv = acciones
                 capital = acciones
@@ -460,7 +457,7 @@ with tab_inversiones:
                         pass
                 val = capital + ganancia_dep
             elif tipo_act == "Fondo Indexado":
-                inv = p_compra  # Almacenamos el capital invertido aquí
+                inv = p_compra
                 val = val_manual if val_manual > 0 else inv
             else:
                 inv = acciones * p_compra
@@ -602,7 +599,6 @@ with tab_ia:
                         acc = float(it.get("acciones", 1.0))
                         p_c = float(it.get("precio_compra", 0.0))
                         
-                        # Si es acción, convertimos el precio total de compra a precio unitario para que yfinance multiplique bien
                         if t_act == "Acción/ETF" and acc > 0:
                             p_c = p_c / acc
                             
