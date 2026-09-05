@@ -55,24 +55,32 @@ def cargar_transacciones():
         st.error(f"Error al cargar transacciones: {e}")
         return []
 
-def cargar_balance_base():
-    transacciones = cargar_transacciones()
-    for t in reversed(transacciones):
-        if t.get("concepto") == "SALDO_INICIAL":
-            return float(t.get("monto", 0.0))
-    return 0.0
-
-def actualizar_balance_base(nuevo_monto):
+def cargar_saldos_cuentas():
+    """Carga los saldos base configurados para cada cuenta."""
     try:
-        supabase.table("transacciones").delete().eq("concepto", "SALDO_INICIAL").execute()
+        res = supabase.table("transacciones").select("*").eq("tipo", "Config_Cuenta").execute()
+        saldos = {"Cuenta Nómina": 0.0, "Cuenta Naranja": 0.0, "Trade Republic": 0.0}
+        for t in res.data or []:
+            concepto = t.get("concepto") # Ej: SALDO_CUENTA_Cuenta Nómina
+            for cuenta in saldos.keys():
+                if cuenta in concepto:
+                    saldos[cuenta] = float(t.get("monto", 0.0))
+        return saldos
+    except Exception:
+        return {"Cuenta Nómina": 0.0, "Cuenta Naranja": 0.0, "Trade Republic": 0.0}
+
+def actualizar_saldo_cuenta(nombre_cuenta, nuevo_monto):
+    concepto_clave = f"SALDO_CUENTA_{nombre_cuenta}"
+    try:
+        supabase.table("transacciones").delete().eq("concepto", concepto_clave).execute()
         supabase.table("transacciones").insert({
-            "concepto": "SALDO_INICIAL",
+            "concepto": concepto_clave,
             "monto": float(nuevo_monto),
-            "tipo": "Config"
+            "tipo": "Config_Cuenta"
         }).execute()
-        st.success("¡Capital inicial actualizado correctamente en la base de datos!")
+        st.success(f"¡Saldo de '{nombre_cuenta}' actualizado correctamente!")
     except Exception as e:
-        st.error(f"Error detallado al actualizar saldo base: {e}")
+        st.error(f"Error al actualizar saldo de {nombre_cuenta}: {e}")
 
 def cargar_activos():
     try:
@@ -150,13 +158,16 @@ def obtener_precio_eur(ticker_code):
 
 # --- CARGA INICIAL DE DATOS ---
 transacciones = cargar_transacciones()
-balance_base = cargar_balance_base()
+saldos_cuentas = cargar_saldos_cuentas()
 activos = cargar_activos()
 
 # --- CÁLCULOS MÉTRICOS PRINCIPALES ---
 total_ingresos = sum(t.get("monto", 0) for t in transacciones if t.get("tipo") == "Ingreso")
 total_gastos = sum(t.get("monto", 0) for t in transacciones if t.get("tipo") == "Gasto")
-efectivo_disponible = balance_base + total_ingresos - total_gastos
+
+# Efectivo total sumando las 3 cuentas + ingresos/gastos globales
+efectivo_base_total = sum(saldos_cuentas.values())
+efectivo_disponible = efectivo_base_total + total_ingresos - total_gastos
 
 valor_portafolio_actual = 0.0
 total_invertido = 0.0
@@ -169,22 +180,18 @@ for a in activos:
     
     inv = acciones * p_compra
     
-    if tipo_act == "Depósito":
+    if tipo_act in ["Depósito", "Cuenta Remunerada"]:
         capital = acciones
         tae = float(a.get("interes_tae", 0.0)) / 100.0
         f_ini_str = a.get("fecha_inicio")
-        f_fin_str = a.get("fecha_fin")
         
         ganancia_dep = 0.0
-        if f_ini_str and f_fin_str:
+        if f_ini_str:
             try:
                 f_ini = datetime.strptime(str(f_ini_str).split()[0], "%Y-%m-%d").date()
-                f_fin = datetime.strptime(str(f_fin_str).split()[0], "%Y-%m-%d").date()
-                total_dias = (f_fin - f_ini).days
                 dias_transcurridos = (hoy - f_ini).days
-                dias_transcurridos = max(0, min(dias_transcurridos, total_dias))
-                if total_dias > 0:
-                    ganancia_dep = capital * (tae * (dias_transcurridos / 365.0))
+                dias_transcurridos = max(0, dias_transcurridos)
+                ganancia_dep = capital * (tae * (dias_transcurridos / 365.0))
             except Exception:
                 pass
         val = capital + ganancia_dep
@@ -202,12 +209,12 @@ for a in activos:
 capital_total = efectivo_disponible + valor_portafolio_actual
 
 # --- INTERFAZ / PANEL SUPERIOR ---
-st.title("💰 Copiloto Financiero & Portafolio")
+st.title("💰 Copiloto Financiero & Multicuenta")
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Capital Total", f"{capital_total:,.2f} €")
-m2.metric("Efectivo Libre", f"{efectivo_disponible:,.2f} €")
-m3.metric("Valor Inversiones", f"{valor_portafolio_actual:,.2f} €")
+m2.metric("Efectivo Libre (Cuentas)", f"{efectivo_disponible:,.2f} €")
+m3.metric("Valor Inversiones / Ahorro", f"{valor_portafolio_actual:,.2f} €")
 ganancia_portafolio = valor_portafolio_actual - total_invertido
 m4.metric("Rendimiento Inversiones", f"{ganancia_portafolio:+,.2f} €")
 
@@ -215,22 +222,37 @@ st.divider()
 
 # --- PESTAÑAS DE NAVEGACIÓN ---
 tab_cuenta, tab_gastos, tab_inversiones, tab_ia = st.tabs([
-    "🏦 Cuenta Base", "⚡ Gastos e Ingresos", "📈 Inversiones", "🤖 Asesor IA Ejecutor"
+    "🏦 Mis Cuentas Bancarias", "⚡ Gastos e Ingresos", "📈 Inversiones y Cuentas Remuneradas", "🤖 Asesor IA Ejecutor"
 ])
 
 # ==========================================
-# 1. CUENTA BASE (EFECTIVO INICIAL)
+# 1. CUENTAS BANCARIAS (Nómina, Naranja, Trade Republic)
 # ==========================================
 with tab_cuenta:
-    st.subheader("⚙️ Configuración del Capital Inicial")
-    col_bal1, col_bal2 = st.columns([2, 1])
-    with col_bal1:
-        nuevo_balance = st.number_input("Capital Inicial de la Cuenta (€):", value=balance_base, min_value=0.0, step=100.0)
-    with col_bal2:
-        st.write("")
-        st.write("")
-        if st.button("Actualizar Capital Inicial", use_container_width=True):
-            actualizar_balance_base(nuevo_balance)
+    st.subheader("🏦 Estado de tus Cuentas Bancarias")
+    st.caption("Gestiona el saldo inicial o actual de cada una de tus cuentas por separado.")
+    
+    col_c1, col_c2, col_c3 = st.columns(3)
+    
+    with col_c1:
+        st.markdown("### 💼 Cuenta Nómina")
+        val_nom = st.number_input("Saldo Cuenta Nómina (€):", value=saldos_cuentas.get("Cuenta Nómina", 0.0), min_value=0.0, step=50.0, key="in_nomina")
+        if st.button("Guardar Nómina", use_container_width=True):
+            actualizar_saldo_cuenta("Cuenta Nómina", val_nom)
+            st.rerun()
+            
+    with col_c2:
+        st.markdown("### 🍊 Cuenta Naranja")
+        val_nar = st.number_input("Saldo Cuenta Naranja (€):", value=saldos_cuentas.get("Cuenta Naranja", 0.0), min_value=0.0, step=50.0, key="in_naranja")
+        if st.button("Guardar Naranja", use_container_width=True):
+            actualizar_saldo_cuenta("Cuenta Naranja", val_nar)
+            st.rerun()
+            
+    with col_c3:
+        st.markdown("### 🟢 Trade Republic")
+        val_tr = st.number_input("Saldo Trade Republic (€):", value=saldos_cuentas.get("Trade Republic", 0.0), min_value=0.0, step=50.0, key="in_tr")
+        if st.button("Guardar Trade Republic", use_container_width=True):
+            actualizar_saldo_cuenta("Trade Republic", val_tr)
             st.rerun()
 
 # ==========================================
@@ -254,7 +276,7 @@ with tab_gastos:
 
     st.divider()
     st.subheader("📊 Historial de Transacciones")
-    transacciones_visibles = [t for t in transacciones if t.get("tipo") != "Config"]
+    transacciones_visibles = [t for t in transacciones if not t.get("tipo", "").startswith("Config")]
     if transacciones_visibles:
         df_trans = pd.DataFrame(transacciones_visibles)
         columnas_mostrar = [c for c in ["id", "created_at", "concepto", "monto", "tipo"] if c in df_trans.columns]
@@ -263,22 +285,20 @@ with tab_gastos:
         st.info("No hay gastos ni ingresos registrados.")
 
 # ==========================================
-# 3. INVERSIONES (Acciones, Fondos, Depósitos + Importación Masiva)
+# 3. INVERSIONES Y CUENTAS REMUNERADAS
 # ==========================================
 with tab_inversiones:
-    st.subheader("🏢 Gestión y Carga de Inversiones")
+    st.subheader("🏢 Inversiones, Fondos y Cuentas Remuneradas")
     
-    opcion_carga = st.selectbox("Elige método de incorporación:", ["➕ Añadir Individualmente", "📁 Importación Masiva (Excel / CSV)"])
+    opcion_carga = st.selectbox("Método de incorporación:", ["➕ Añadir Individualmente", "📁 Importación Masiva (Excel / CSV)"])
     st.divider()
     
     if opcion_carga == "📁 Importación Masiva (Excel / CSV)":
         st.markdown("### 📥 Sube tu cartera de golpe")
-        st.caption("Sube un archivo Excel (.xlsx) o CSV con las columnas: `tipo_activo`, `ticker`, `nombre`, `acciones`, `precio_compra`")
-        
         df_plantilla = pd.DataFrame([
-            {"tipo_activo": "Acción/ETF", "ticker": "AAPL", "nombre": "Apple Inc.", "acciones": 10.0, "precio_compra": 150.0},
-            {"tipo_activo": "Fondo Indexado", "ticker": "IE00B4L5Y983", "nombre": "Vanguard Global Stock", "acciones": 25.5, "precio_compra": 110.0},
-            {"tipo_activo": "Depósito", "ticker": "DEPOSITO", "nombre": "Depósito Wizink", "acciones": 5000.0, "precio_compra": 1.0}
+            {"tipo_activo": "Acción/ETF", "ticker": "AAPL", "nombre": "Apple Inc.", "acciones": 10.0, "precio_compra": 150.0, "interes_tae": 0.0},
+            {"tipo_activo": "Cuenta Remunerada", "ticker": "TR", "nombre": "Efectivo Trade Republic", "acciones": 3000.0, "precio_compra": 1.0, "interes_tae": 3.04},
+            {"tipo_activo": "Fondo Indexado", "ticker": "IE00B4L5Y983", "nombre": "Vanguard Global Stock", "acciones": 25.5, "precio_compra": 110.0, "interes_tae": 0.0}
         ])
         
         buffer = io.BytesIO()
@@ -300,22 +320,23 @@ with tab_inversiones:
                 else:
                     df_subida = pd.read_excel(archivo_subido)
                 
-                if st.button("🚀 Procesar e Insertar Cartera en Supabase", type="primary"):
+                if st.button("🚀 Procesar e Insertar en Supabase", type="primary"):
                     for _, row in df_subida.iterrows():
                         agregar_activo_db(
                             ticker=str(row.get("ticker", "MANUAL")),
                             nombre=str(row.get("nombre", "Activo")),
                             acciones=float(row.get("acciones", 0)),
                             precio_compra=float(row.get("precio_compra", 0)),
-                            tipo_activo=str(row.get("tipo_activo", "Acción/ETF"))
+                            tipo_activo=str(row.get("tipo_activo", "Acción/ETF")),
+                            interes_tae=float(row.get("interes_tae", 0.0))
                         )
-                    st.success("¡Toda la cartera ha sido importada con éxito!")
+                    st.success("¡Importación masiva completada con éxito!")
                     st.rerun()
             except Exception as e:
                 st.error(f"Error al leer el archivo: {e}")
 
     else:
-        tipo_seleccionado = st.radio("Tipo de activo:", ["Acción / ETF", "Fondo Indexado", "Depósito Bancario"], horizontal=True)
+        tipo_seleccionado = st.radio("Tipo de activo o cuenta:", ["Acción / ETF", "Fondo Indexado", "Cuenta Remunerada / Depósito"], horizontal=True)
         st.write("")
         
         if tipo_seleccionado == "Acción / ETF":
@@ -363,32 +384,21 @@ with tab_inversiones:
                 st.rerun()
 
         else:
-            d_nombre = st.text_input("Nombre del Depósito:", value="Depósito Plazo Fijo")
-            d_capital = st.number_input("Capital Invertido (€):", min_value=0.0, value=5000.0)
-            d_interes = st.number_input("Interés Anual (% TAE):", min_value=0.0, value=3.0)
-            c_d1, c_d2 = st.columns(2)
-            with c_d1:
-                f_inicio = st.date_input("Fecha Inicio:", value=date.today())
-            with c_d2:
-                f_fin = st.date_input("Fecha Vencimiento:", value=date(date.today().year + 1, date.today().month, date.today().day))
+            cr_nombre = st.text_input("Nombre (ej. Trade Republic o Cuenta Naranja):", value="Trade Republic Remunerada")
+            cr_capital = st.number_input("Capital Remunerado (€):", min_value=0.0, value=3000.0)
+            cr_tae = st.number_input("Interés Anual (% TAE):", min_value=0.0, value=3.04)
+            f_inicio = st.date_input("Fecha Inicio de Cómputo:", value=date.today())
                 
-            if st.button("Añadir Depósito", use_container_width=True):
-                agregar_activo_db("DEPOSITO", d_nombre, d_capital, 1.0, "Depósito", fecha_inicio=f_inicio, fecha_fin=f_fin, interes_tae=d_interes)
-                st.success("Añadido depósito correctamente.")
+            if st.button("Añadir Cuenta Remunerada", use_container_width=True):
+                agregar_activo_db("CUENTA_REM", cr_nombre, cr_capital, 1.0, "Cuenta Remunerada", fecha_inicio=f_inicio, interes_tae=cr_tae)
+                st.success("Cuenta remunerada añadida correctamente.")
                 st.rerun()
 
     st.divider()
     
-    c_inf1, c_inf2 = st.columns([3, 1])
-    with c_inf1:
-        st.subheader("💼 Desglose de Inversiones Actuales")
-    with c_inf2:
-        modo_rentabilidad = st.radio("Ver rentabilidad en:", ["%", "€"], horizontal=True, label_visibility="collapsed")
-
     if activos:
         tabla = []
-        grafico_data = []
-        grafico_tipo_data = {"Acción/ETF": 0.0, "Fondo Indexado": 0.0, "Depósito": 0.0}
+        grafico_tipo_data = {"Acción/ETF": 0.0, "Fondo Indexado": 0.0, "Cuenta Remunerada": 0.0}
         
         for item in activos:
             p_compra = float(item.get("precio_compra", 0))
@@ -397,22 +407,18 @@ with tab_inversiones:
             nombre = item.get("nombre", ticker)
             tipo_act = item.get("tipo_activo", "Acción/ETF")
             
-            if tipo_act == "Depósito":
+            if tipo_act in ["Depósito", "Cuenta Remunerada"]:
                 capital = acciones
                 tae = float(item.get("interes_tae", 0.0)) / 100.0
                 f_ini_str = item.get("fecha_inicio")
-                f_fin_str = item.get("fecha_fin")
                 
                 ganancia_dep = 0.0
-                if f_ini_str and f_fin_str:
+                if f_ini_str:
                     try:
                         f_ini = datetime.strptime(str(f_ini_str).split()[0], "%Y-%m-%d").date()
-                        f_fin = datetime.strptime(str(f_fin_str).split()[0], "%Y-%m-%d").date()
-                        total_dias = (f_fin - f_ini).days
                         dias_transcurridos = (hoy - f_ini).days
-                        dias_transcurridos = max(0, min(dias_transcurridos, total_dias))
-                        if total_dias > 0:
-                            ganancia_dep = capital * (tae * (dias_transcurridos / 365.0))
+                        dias_transcurridos = max(0, dias_transcurridos)
+                        ganancia_dep = capital * (tae * (dias_transcurridos / 365.0))
                     except Exception:
                         pass
                 inv = capital
@@ -432,23 +438,18 @@ with tab_inversiones:
                 gan = val - inv
                 pnl = (gan / inv) * 100 if inv > 0 else 0
                 
-            if modo_rentabilidad == "%":
-                txt_rent = f"{pnl:+.2f}%"
-            else:
-                txt_rent = f"{gan:+.2f} €"
-                
+            txt_rent = f"{gan:+.2f} €"
             color_estilo = "color: #2e7d32; font-weight: bold;" if gan >= 0 else "color: #c62828; font-weight: bold;"
             rentabilidad_html = f'<span style="{color_estilo}">{txt_rent}</span>'
             
             tabla.append({
                 "Tipo": tipo_act,
                 "Activo": nombre,
-                "Invertido (€)": f"{inv:,.2f}",
+                "Capital/Inv (€)": f"{inv:,.2f}",
                 "Valor Actual (€)": f"{val:,.2f}",
-                "Rentabilidad": rentabilidad_html
+                "Ganancia Generada": rentabilidad_html
             })
             
-            grafico_data.append({"Activo": nombre, "Valor (€)": val})
             if tipo_act in grafico_tipo_data:
                 grafico_tipo_data[tipo_act] += val
             else:
@@ -456,38 +457,18 @@ with tab_inversiones:
             
         df_tabla = pd.DataFrame(tabla)
         st.markdown(df_tabla.to_html(escape=False, index=False), unsafe_allow_html=True)
-        
-        st.write("")
-        col_g1, col_g2 = st.columns(2)
-        with col_g1:
-            st.markdown("**Distribución por Tipo de Inversión**")
-            df_tipos = pd.DataFrame([{"Tipo": k, "Valor": v} for k, v in grafico_tipo_data.items() if v > 0])
-            if not df_tipos.empty:
-                fig_pie_tipo = px.pie(df_tipos, names="Tipo", values="Valor", hole=0.4)
-                st.plotly_chart(fig_pie_tipo, use_container_width=True)
-            else:
-                st.info("Sin datos para gráficos.")
-            
-        with col_g2:
-            st.markdown("**Capital: Efectivo vs Inversiones**")
-            df_patrimonio = pd.DataFrame([
-                {"Tipo": "Efectivo Libre", "Monto": efectivo_disponible},
-                {"Tipo": "Inversiones", "Monto": valor_portafolio_actual}
-            ])
-            fig_bar = px.bar(df_patrimonio, x="Tipo", y="Monto", color="Tipo", text_auto=".2f")
-            st.plotly_chart(fig_bar, use_container_width=True)
     else:
-        st.info("Añade tus inversiones de forma manual, por IA o subiendo una plantilla Excel para empezar.")
+        st.info("No hay inversiones ni cuentas remuneradas añadidas.")
 
 # ==========================================
-# 4. ASESOR IA EJECUTOR (DICTA TU CARTERA AQUÍ)
+# 4. ASESOR IA EJECUTOR MULTICUENTA
 # ==========================================
 with tab_ia:
-    st.subheader("🤖 Asistente IA Dictador de Cartera")
-    st.caption("Escribe en lenguaje natural lo que tienes invertido y la IA lo estructurará, buscará los tickers y lo guardará sola en tu base de datos.")
+    st.subheader("🤖 Asistente IA Multicuenta Inteligente")
+    st.caption("Escribe de forma natural sobre tus cuentas (Nómina, Naranja, Trade Republic) o inversiones, y la IA lo organizará todo en tu base de datos.")
     
     api_key = st.secrets.get("GEMINI_API_KEY", "")
-    instruccion = st.text_area("Cuéntale a la IA tus movimientos o cartera:", placeholder="Ejemplo: Tengo 10 acciones de Apple a 150€, 20 participaciones de un fondo Vanguard S&P 500 a 100€, y un depósito de 4000€ al 2.5%...")
+    instruccion = st.text_area("Cuéntale a la IA tu estado financiero:", placeholder="Ejemplo: Tengo 1200 euros en la Cuenta Nómina, 8000 euros en la Cuenta Naranja al 1% de TAE, y 5000 euros en Trade Republic al 3.04%...")
     
     if st.button("Ejecutar con IA", use_container_width=True) and instruccion:
         if not api_key:
@@ -498,36 +479,36 @@ with tab_ia:
                 client = genai.Client(api_key=api_key)
                 
                 prompt_ia = f"""
-                Eres el motor ejecutor y experto financiero de una app. Analiza la petición del usuario: '{instruccion}'.
-                El usuario puede querer registrar un gasto, un ingreso, cambiar el capital inicial, o añadir uno o varios activos de inversión.
+                Eres el motor ejecutor y experto financiero de una app con múltiples cuentas. Analiza la petición: '{instruccion}'.
+                El usuario puede querer configurar saldos de sus cuentas específicas ('Cuenta Nómina', 'Cuenta Naranja', 'Trade Republic'), registrar un gasto/ingreso o añadir inversiones/cuentas remuneradas.
                 
-                Debes interpretar la petición y responder ÚNICAMENTE con un JSON puro (sin bloques de código markdown extra tipo ```json) con esta estructura:
+                Responde ÚNICAMENTE con un JSON puro (sin bloques de código markdown) con esta estructura:
+                
+                Si actualiza saldos de cuentas corrientes/ahorro principales:
+                {{
+                  "accion": "cuentas_banco",
+                  "actualizaciones": [
+                    {{"cuenta": "Cuenta Nómina" o "Cuenta Naranja" or "Trade Republic", "monto": 0.0}}
+                  ]
+                }}
                 
                 Si es un movimiento de gasto/ingreso:
                 {{"accion": "movimiento", "concepto": "...", "monto": 0.0, "tipo": "Gasto" or "Ingreso"}}
                 
-                Si es para cambiar el saldo base inicial:
-                {{"accion": "saldo_base", "monto": 0.0}}
-                
-                Si es para añadir una o varias inversiones (puede ser una lista):
+                Si es para añadir inversiones o cuentas remuneradas de ahorro:
                 {{
                   "accion": "inversion",
                   "items": [
                     {{
-                      "tipo_activo": "Acción/ETF" o "Fondo Indexado" o "Depósito",
-                      "ticker": "Ticker de Yahoo Finance si lo conoces (ej AAPL, MSFT) o busca uno lógico, si es depósito pon DEPOSITO",
+                      "tipo_activo": "Acción/ETF" o "Fondo Indexado" o "Cuenta Remunerada",
+                      "ticker": "Ticker si aplica o MANUAL",
                       "nombre": "Nombre descriptivo",
-                      "acciones": numero_de_acciones_o_participaciones_o_capital_en_deposito,
-                      "precio_compra": precio_medio_o_1_si_es_deposito,
-                      "fecha_inicio": "YYYY-MM-DD o null si no aplica",
-                      "fecha_fin": "YYYY-MM-DD o null si no aplica",
+                      "acciones": capital_o_acciones,
+                      "precio_compra": 1.0,
                       "interes_tae": 0.0
                     }}
                   ]
                 }}
-                
-                Si es una simple pregunta o consulta general:
-                {{"accion": "consulta", "respuesta": "texto de respuesta"}}
                 """
                 
                 res = client.models.generate_content(
@@ -539,12 +520,13 @@ with tab_ia:
                 data = json.loads(texto_limpio)
                 
                 accion = data.get("accion")
-                if accion == "movimiento":
+                if accion == "cuentas_banco":
+                    for act in data.get("actualizaciones", []):
+                        actualizar_saldo_cuenta(act["cuenta"], act["monto"])
+                    st.success("¡IA: Saldos de cuentas bancarias actualizados con éxito!")
+                elif accion == "movimiento":
                     registrar_movimiento_db(data["concepto"], data["monto"], data["tipo"])
-                    st.success(f"IA: Registrado {data['tipo']} de {data['monto']} € en '{data['concepto']}'.")
-                elif accion == "saldo_base":
-                    actualizar_balance_base(data["monto"])
-                    st.success(f"IA: Capital inicial actualizado a {data['monto']} €.")
+                    st.success(f"IA: Registrado {data['tipo']} de {data['monto']} €.")
                 elif accion == "inversion":
                     items = data.get("items", [])
                     for it in items:
@@ -554,14 +536,12 @@ with tab_ia:
                             acciones=float(it.get("acciones", 0)),
                             precio_compra=float(it.get("precio_compra", 0)),
                             tipo_activo=it.get("tipo_activo", "Acción/ETF"),
-                            fecha_inicio=it.get("fecha_inicio"),
-                            fecha_fin=it.get("fecha_fin"),
                             interes_tae=float(it.get("interes_tae", 0.0))
                         )
-                    st.success(f"¡IA: Se han añadido con éxito {len(items)} activos/inversiones a tu portafolio!")
+                    st.success(f"¡IA: Se han añadido {len(items)} elementos al portafolio!")
                 else:
-                    st.info(data.get("respuesta", ""))
+                    st.info("Instrucción procesada.")
                     
                 st.rerun()
             except Exception as e:
-                st.error(f"Error procesando la instrucción con IA: {e}")
+                st.error(f"Error procesando con IA: {e}")
