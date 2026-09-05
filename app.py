@@ -51,8 +51,7 @@ def cargar_transacciones():
     try:
         res = supabase.table("transacciones").select("*").execute()
         return res.data or []
-    except Exception as e:
-        st.error(f"Error al cargar transacciones: {e}")
+    except Exception:
         return []
 
 def cargar_saldos_cuentas():
@@ -95,6 +94,15 @@ def eliminar_activo_db(activo_id):
     except Exception as e:
         st.error(f"Error al eliminar activo: {e}")
 
+def actualizar_activo_db(activo_id, nuevas_acciones, nuevo_precio):
+    try:
+        supabase.table("activos").update({
+            "acciones": float(nuevas_acciones),
+            "precio_compra": float(nuevo_precio)
+        }).eq("id", activo_id).execute()
+    except Exception as e:
+        st.error(f"Error al actualizar activo en BD: {e}")
+
 def registrar_movimiento_db(concepto, monto, tipo):
     try:
         supabase.table("transacciones").insert({
@@ -128,7 +136,7 @@ def agregar_activo_db(ticker, nombre, acciones, precio_compra, tipo_activo="Acci
         except Exception as err:
             st.error(f"Error crítico al agregar activo: {err}")
 
-# --- MERCADO Y COTIZACIONES EN TIEMPO REAL ---
+# --- MERCADO Y COTIZACIONES EN TIEMPO REAL (CON CACHÉ Y TOLERANCIA A FALLOS) ---
 def buscar_coincidencias(query):
     url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=6&newsCount=0"
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -145,18 +153,26 @@ def buscar_coincidencias(query):
     except Exception:
         return []
 
+@st.cache_data(ttl=600)  # Caché de 10 minutos para evitar bloqueos por exceso de peticiones a Yahoo
 def obtener_precio_eur(ticker_code):
+    if not ticker_code or ticker_code in ["MANUAL", "FONDO_MANUAL", "DEPOSITO"]:
+        return None
     try:
         stock = yf.Ticker(ticker_code)
         hist = stock.history(period="1d")
         if hist.empty:
             return None
         precio = float(hist['Close'].iloc[-1])
-        currency = stock.fast_info.currency
-        if currency and currency.upper() == "USD":
-            fx = yf.Ticker("EURUSD=X").history(period="1d")
-            if not fx.empty:
-                precio /= float(fx['Close'].iloc[-1])
+        
+        # Intentar detectar divisa y convertir a EUR si está en USD
+        try:
+            currency = stock.fast_info.currency
+            if currency and currency.upper() == "USD":
+                fx = yf.Ticker("EURUSD=X").history(period="1d")
+                if not fx.empty:
+                    precio /= float(fx['Close'].iloc[-1])
+        except Exception:
+            pass
         return precio
     except Exception:
         return None
@@ -181,6 +197,7 @@ for a in activos:
     acciones = float(a.get("acciones", 0))
     p_compra = float(a.get("precio_compra", 0))
     tipo_act = a.get("tipo_activo", "Acción/ETF")
+    ticker = a.get("ticker", "")
     
     inv = acciones * p_compra
     
@@ -201,11 +218,14 @@ for a in activos:
         val = capital + ganancia_dep
         inv = capital
     elif tipo_act == "Fondo Indexado":
-        ticker = a.get("ticker", "")
-        p_actual = obtener_precio_eur(ticker) if ticker and ticker != "FONDO_MANUAL" else p_compra
+        p_actual = obtener_precio_eur(ticker) if ticker and ticker not in ["FONDO_MANUAL", "MANUAL"] else p_compra
+        if not p_actual: 
+            p_actual = p_compra
         val = acciones * p_actual
     else:
-        p_actual = obtener_precio_eur(a.get("ticker", "")) or p_compra
+        p_actual = obtener_precio_eur(ticker) if ticker and ticker != "MANUAL" else p_compra
+        if not p_actual: 
+            p_actual = p_compra
         val = acciones * p_actual
         
     total_invertido += inv
@@ -371,13 +391,15 @@ with tab_inversiones:
                 opciones_fondo = buscar_coincidencias(f_busqueda)
                 if opciones_fondo:
                     dict_f = {f"{item['name']} ({item['symbol']})": item for item in opciones_fondo}
-                    f_ticker_final = dict_f[sel_f]["symbol"] if 'sel_f' in locals() else "FONDO_MANUAL"
+                    sel_f = st.selectbox("Selecciona fondo:", list(dict_f.keys()))
+                    f_ticker_final = dict_f[sel_f]["symbol"]
+                    f_nombre_final = dict_f[sel_f]["name"]
                     
             c_part, c_vl = st.columns(2)
             with c_part:
-                num_part = st.number_input("Nº Participaciones:", min_value=0.001, value=10.0)
+                num_part = st.number_input("Nº Participaciones:", min_value=0.001, value=10.0, key="num_part_f")
             with c_vl:
-                val_liq = st.number_input("Valor Liquidativo Medio (€):", min_value=0.0, value=100.0)
+                val_liq = st.number_input("Valor Liquidativo Medio (€):", min_value=0.0, value=100.0, key="val_liq_f")
                 
             if st.button("Añadir Fondo Indexado", use_container_width=True):
                 agregar_activo_db(f_ticker_final, f_nombre_final, num_part, val_liq, "Fondo Indexado")
@@ -396,7 +418,7 @@ with tab_inversiones:
                 st.rerun()
 
     st.divider()
-    st.subheader("📋 Detalle y Gestión de Activos")
+    st.subheader("📋 Detalle, Cotización en Tiempo Real y Edición de Activos")
     
     if activos:
         tabla = []
@@ -408,17 +430,16 @@ with tab_inversiones:
             nombre = item.get("nombre", ticker)
             tipo_act = item.get("tipo_activo", "Acción/ETF")
             
+            p_actual = p_compra
             if tipo_act in ["Depósito", "Cuenta Remunerada"]:
                 capital = acciones
                 tae = float(item.get("interes_tae", 0.0)) / 100.0
                 f_ini_str = item.get("fecha_inicio")
-                
                 ganancia_dep = 0.0
                 if f_ini_str:
                     try:
                         f_ini = datetime.strptime(str(f_ini_str).split()[0], "%Y-%m-%d").date()
-                        dias_transcurridos = (hoy - f_ini).days
-                        dias_transcurridos = max(0, dias_transcurridos)
+                        dias_transcurridos = max(0, (hoy - f_ini).days)
                         ganancia_dep = capital * (tae * (dias_transcurridos / 365.0))
                     except Exception:
                         pass
@@ -427,35 +448,68 @@ with tab_inversiones:
                 gan = ganancia_dep
             elif tipo_act == "Fondo Indexado":
                 p_actual = obtener_precio_eur(ticker) if ticker and ticker != "FONDO_MANUAL" else p_compra
+                if not p_actual: 
+                    p_actual = p_compra
                 inv = acciones * p_compra
                 val = acciones * p_actual
                 gan = val - inv
             else:
-                p_actual = obtener_precio_eur(ticker) or p_compra
+                p_actual = obtener_precio_eur(ticker) if ticker and ticker != "MANUAL" else p_compra
+                if not p_actual: 
+                    p_actual = p_compra
                 inv = acciones * p_compra
                 val = acciones * p_actual
                 gan = val - inv
                 
-            txt_rent = f"{gan:+.2f} €"
-            color_estilo = "color: #2e7d32; font-weight: bold;" if gan >= 0 else "color: #c62828; font-weight: bold;"
-            rentabilidad_html = f'<span style="{color_estilo}">{txt_rent}</span>'
+            rent_pct = ((val - inv) / inv * 100) if inv > 0 else 0.0
             
             tabla.append({
                 "id": act_id,
                 "Tipo": tipo_act,
                 "Activo": nombre,
-                "Invertido (€)": f"{inv:,.2f}",
-                "Valor Actual (€)": f"{val:,.2f}",
-                "Ganancia": rentabilidad_html
+                "Ticker": ticker,
+                "Acciones / Capital": acciones,
+                "Precio Compra (€)": p_compra,
+                "Precio Actual (€)": round(p_actual, 2),
+                "Valor Actual (€)": round(val, 2),
+                "Ganancia (€)": round(gan, 2),
+                "Rentabilidad (%)": round(rent_pct, 2)
             })
             
         df_tabla = pd.DataFrame(tabla)
-        st.markdown(df_tabla.drop(columns=["id"]).to_html(escape=False, index=False), unsafe_allow_html=True)
         
-        st.write("")
-        st.markdown("### 🗑️ Eliminar Activo Erróneo")
+        # Permitir edición directa en Acciones / Participaciones y Precio de Compra
+        st.caption("💡 Puedes editar directamente las celdas de **Acciones / Capital** o **Precio Compra (€)** en la tabla y guardar los cambios.")
+        
+        df_editado = st.data_editor(
+            df_tabla,
+            column_config={
+                "id": None, # Ocultar ID interno
+                "Tipo": st.column_config.TextColumn("Tipo", disabled=True),
+                "Activo": st.column_config.TextColumn("Activo", disabled=True),
+                "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
+                "Acciones / Capital": st.column_config.NumberColumn("Acciones / Capital", format="%.4f"),
+                "Precio Compra (€)": st.column_config.NumberColumn("Precio Compra (€)", format="%.2f €"),
+                "Precio Actual (€)": st.column_config.NumberColumn("Precio Actual (€)", format="%.2f €", disabled=True),
+                "Valor Actual (€)": st.column_config.NumberColumn("Valor Actual (€)", format="%.2f €", disabled=True),
+                "Ganancia (€)": st.column_config.NumberColumn("Ganancia (€)", format="%.2f €", disabled=True),
+                "Rentabilidad (%)": st.column_config.NumberColumn("Rentabilidad (%)", format="%.2f %%", disabled=True)
+            },
+            hide_index=True,
+            use_container_width=True,
+            key="editor_activos"
+        )
+        
+        if st.button("💾 Guardar Cambios Modificados en la Base de Datos", type="primary"):
+            for _, row in df_editado.iterrows():
+                actualizar_activo_db(row["id"], row["Acciones / Capital"], row["Precio Compra (€)"])
+            st.success("¡Cambios actualizados y guardados en Supabase correctamente!")
+            st.rerun()
+            
+        st.divider()
+        st.markdown("### 🗑️ Eliminar Activo")
         opciones_eliminar = {f"{row['Tipo']} - {row['Activo']} (ID: {row['id']})": row['id'] for row in tabla}
-        sel_eliminar = st.selectbox("Selecciona activo a borrar si está mal introducido:", list(opciones_eliminar.keys()))
+        sel_eliminar = st.selectbox("Selecciona activo a borrar:", list(opciones_eliminar.keys()))
         if st.button("❌ Borrar Activo Seleccionado", type="primary"):
             eliminar_activo_db(opciones_eliminar[sel_eliminar])
             st.rerun()
@@ -506,7 +560,6 @@ with tab_ia:
                 }}
                 """
                 
-                # Modelos oficiales vigentes y contrastados
                 modelos_a_probar = [
                     "gemini-2.5-flash",
                     "gemini-3.5-flash"
@@ -514,10 +567,9 @@ with tab_ia:
                 
                 res = None
                 ultimo_error = None
-                tiempo_limite = 30  # Mínimo 30 segundos de persistencia activa ante saturación
+                tiempo_limite = 30
                 inicio_proceso = time.time()
                 
-                # Barra de carga visible y persistente durante 30 segundos ante congestión
                 with st.spinner("🤖 Procesando solicitud... Reintentando automáticamente conexión con la IA (hasta 30 segundos si hay alta congestión en los servidores)..."):
                     while (time.time() - inicio_proceso) < tiempo_limite:
                         for mod in modelos_a_probar:
@@ -526,19 +578,18 @@ with tab_ia:
                                     model=mod,
                                     contents=prompt_ia
                                 )
-                                break  # Éxito: sale del bucle de modelos
+                                break
                             except Exception as err:
                                 ultimo_error = err
                                 continue
                         
                         if res is not None:
-                            break  # Éxito: sale del bucle temporal general
+                            break
                         
-                        # Pausa de 3 segundos entre cada intento para no sobrecargar
                         time.sleep(3)
                 
                 if res is None:
-                    raise Exception(f"Los servidores continuaron saturados tras 30 segundos de reintentos continuos. Detalle técnico: {ultimo_error}")
+                    raise Exception(f"Los servidores continuaron saturados tras 30 segundos de reintentos automáticos. Detalle técnico: {ultimo_error}")
                 
                 texto_limpio = res.text.replace("```json", "").replace("```", "").strip()
                 data = json.loads(texto_limpio)
