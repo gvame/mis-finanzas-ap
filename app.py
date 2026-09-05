@@ -44,7 +44,7 @@ with st.sidebar:
         st.rerun()
     st.divider()
 
-# --- FUNCIONES DE BASE DE DATOS (SUPABASE) ---
+# --- FUNCIONES DE BASE DE DATOS (PROTEGIDAS CONTRA APIERROR) ---
 def cargar_balance_base():
     try:
         res = supabase.table("configuracion").select("valor").eq("clave", "balance_base").execute()
@@ -55,11 +55,14 @@ def cargar_balance_base():
     return 0.0
 
 def actualizar_balance_base(nuevo_monto):
-    res = supabase.table("configuracion").select("*").eq("clave", "balance_base").execute()
-    if res.data:
-        supabase.table("configuracion").update({"valor": float(nuevo_monto)}).eq("clave", "balance_base").execute()
-    else:
-        supabase.table("configuracion").insert({"clave": "balance_base", "valor": float(nuevo_monto)}).execute()
+    try:
+        res = supabase.table("configuracion").select("*").eq("clave", "balance_base").execute()
+        if res.data:
+            supabase.table("configuracion").update({"valor": float(nuevo_monto)}).eq("clave", "balance_base").execute()
+        else:
+            supabase.table("configuracion").insert({"clave": "balance_base", "valor": float(nuevo_monto)}).execute()
+    except Exception as e:
+        st.error(f"Error al actualizar balance base: {e}")
 
 def cargar_transacciones():
     try:
@@ -73,23 +76,32 @@ def cargar_transacciones():
             return []
 
 def cargar_activos():
-    res = supabase.table("activos").select("*").execute()
-    return res.data or []
+    try:
+        res = supabase.table("activos").select("*").execute()
+        return res.data or []
+    except Exception:
+        return []
 
 def registrar_movimiento_db(concepto, monto, tipo):
-    supabase.table("transacciones").insert({
-        "concepto": concepto,
-        "monto": float(monto),
-        "tipo": tipo
-    }).execute()
+    try:
+        supabase.table("transacciones").insert({
+            "concepto": concepto,
+            "monto": float(monto),
+            "tipo": tipo
+        }).execute()
+    except Exception as e:
+        st.error(f"Error al registrar movimiento: {e}")
 
 def agregar_activo_db(ticker, nombre, acciones, precio_compra):
-    supabase.table("activos").insert({
-        "ticker": ticker,
-        "nombre": nombre,
-        "acciones": float(acciones),
-        "precio_compra": float(precio_compra)
-    }).execute()
+    try:
+        supabase.table("activos").insert({
+            "ticker": ticker,
+            "nombre": nombre,
+            "acciones": float(acciones),
+            "precio_compra": float(precio_compra)
+        }).execute()
+    except Exception as e:
+        st.error(f"Error al agregar activo: {e}")
 
 # --- MERCADO Y COTIZACIONES EN TIEMPO REAL ---
 def buscar_coincidencias(query):
@@ -130,17 +142,19 @@ transacciones = cargar_transacciones()
 activos = cargar_activos()
 
 # --- CÁLCULOS MÉTRICOS PRINCIPALES ---
-total_ingresos = sum(t["monto"] for t in transacciones if t["tipo"] == "Ingreso")
-total_gastos = sum(t["monto"] for t in transacciones if t["tipo"] == "Gasto")
+total_ingresos = sum(t.get("monto", 0) for t in transacciones if t.get("tipo") == "Ingreso")
+total_gastos = sum(t.get("monto", 0) for t in transacciones if t.get("tipo") == "Gasto")
 efectivo_disponible = balance_base + total_ingresos - total_gastos
 
 valor_portafolio_actual = 0.0
 total_invertido = 0.0
 
 for a in activos:
-    inv = a["acciones"] * a["precio_compra"]
-    p_actual = obtener_precio_eur(a["ticker"]) or a["precio_compra"]
-    val = a["acciones"] * p_actual
+    acciones = float(a.get("acciones", 0))
+    p_compra = float(a.get("precio_compra", 0))
+    inv = acciones * p_compra
+    p_actual = obtener_precio_eur(a.get("ticker", "")) or p_compra
+    val = acciones * p_actual
     total_invertido += inv
     valor_portafolio_actual += val
 
@@ -178,7 +192,7 @@ with tab_cuenta:
         st.write("")
         if st.button("Actualizar Saldo Base", use_container_width=True):
             actualizar_balance_base(nuevo_balance)
-            st.success("Saldo base actualizado en Supabase.")
+            st.success("Saldo base actualizado.")
             st.rerun()
 
 # ==========================================
@@ -203,8 +217,9 @@ with tab_gastos:
     st.divider()
     st.subheader("📊 Historial de Transacciones")
     if transacciones:
-        df_trans = pd.DataFrame(transacciones)[["id", "created_at", "concepto", "monto", "tipo"]]
-        st.dataframe(df_trans, use_container_width=True)
+        df_trans = pd.DataFrame(transacciones)
+        columnas_mostrar = [c for c in ["id", "created_at", "concepto", "monto", "tipo"] if c in df_trans.columns]
+        st.dataframe(df_trans[columnas_mostrar], use_container_width=True)
     else:
         st.info("No hay gastos ni ingresos registrados.")
 
@@ -230,7 +245,7 @@ with tab_portafolio:
                 
             if st.button("Añadir al Portafolio", use_container_width=True):
                 agregar_activo_db(activo_elegido["symbol"], activo_elegido["name"], num_acc, prec_c)
-                st.success(f"Añadido {activo_elegido['name']} a Supabase.")
+                st.success(f"Añadido {activo_elegido['name']} a la base de datos.")
                 st.rerun()
 
     st.divider()
@@ -241,23 +256,28 @@ with tab_portafolio:
         grafico_data = []
         
         for item in activos:
-            p_actual = obtener_precio_eur(item["ticker"]) or item["precio_compra"]
-            inv = item["acciones"] * item["precio_compra"]
-            val = item["acciones"] * p_actual
+            p_compra = float(item.get("precio_compra", 0))
+            acciones = float(item.get("acciones", 0))
+            ticker = item.get("ticker", "")
+            nombre = item.get("nombre", ticker)
+            
+            p_actual = obtener_precio_eur(ticker) or p_compra
+            inv = acciones * p_compra
+            val = acciones * p_actual
             gan = val - inv
             pnl = (gan / inv) * 100 if inv > 0 else 0
             
             tabla.append({
-                "Ticker": item["ticker"],
-                "Empresa": item["nombre"],
-                "Acciones": item["acciones"],
-                "Precio Compra (€)": f"{item['precio_compra']:.2f}",
+                "Ticker": ticker,
+                "Empresa": nombre,
+                "Acciones": acciones,
+                "Precio Compra (€)": f"{p_compra:.2f}",
                 "Precio Actual (€)": f"{p_actual:.2f}",
                 "Invertido (€)": f"{inv:.2f}",
                 "Valor Actual (€)": f"{val:.2f}",
                 "Rendimiento": f"{gan:+.2f} € ({pnl:+.2f}%)"
             })
-            grafico_data.append({"Empresa": item["nombre"], "Valor (€)": val})
+            grafico_data.append({"Empresa": nombre, "Valor (€)": val})
             
         st.dataframe(pd.DataFrame(tabla), use_container_width=True)
         
