@@ -9,6 +9,24 @@ from supabase import create_client, Client
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Copiloto Financiero SaaS", page_icon="💰", layout="wide")
 
+# --- CONTROL DE ACCESO PRIVADO ---
+if "autenticado" not in st.session_state:
+    st.session_state.autenticado = False
+
+if not st.session_state.autenticado:
+    st.title("🔒 Acceso Privado")
+    st.caption("Introduce tu clave personal para acceder a tu panel financiero.")
+    
+    password_input = st.text_input("Contraseña de acceso:", type="password")
+    
+    if st.button("Entrar", type="primary", use_container_width=True):
+        if password_input == st.secrets.get("APP_PASSWORD"):
+            st.session_state.autenticado = True
+            st.rerun()
+        else:
+            st.error("Contraseña incorrecta.")
+    st.stop()
+
 # --- CONEXIÓN A SUPABASE ---
 try:
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
@@ -18,11 +36,22 @@ except Exception as e:
     st.error("Error al conectar con Supabase. Revisa tus Secrets en Streamlit Cloud.")
     st.stop()
 
+# --- BARRA LATERAL / CERRAR SESIÓN ---
+with st.sidebar:
+    st.write("👤 **Sesión Activa**")
+    if st.button("🔒 Cerrar Sesión"):
+        st.session_state.autenticado = False
+        st.rerun()
+    st.divider()
+
 # --- FUNCIONES DE BASE DE DATOS (SUPABASE) ---
 def cargar_balance_base():
-    res = supabase.table("configuracion").select("valor").eq("clave", "balance_base").execute()
-    if res.data:
-        return float(res.data[0]["valor"])
+    try:
+        res = supabase.table("configuracion").select("valor").eq("clave", "balance_base").execute()
+        if res.data:
+            return float(res.data[0]["valor"])
+    except Exception:
+        pass
     return 0.0
 
 def actualizar_balance_base(nuevo_monto):
@@ -93,7 +122,7 @@ balance_base = cargar_balance_base()
 transacciones = cargar_transacciones()
 activos = cargar_activos()
 
-# --- CÁLCULOS METRICOS PRINCIPALES ---
+# --- CÁLCULOS MÉTRICOS PRINCIPALES ---
 total_ingresos = sum(t["monto"] for t in transacciones if t["tipo"] == "Ingreso")
 total_gastos = sum(t["monto"] for t in transacciones if t["tipo"] == "Gasto")
 efectivo_disponible = balance_base + total_ingresos - total_gastos
@@ -111,7 +140,7 @@ for a in activos:
 patrimonio_total = efectivo_disponible + valor_portafolio_actual
 
 # --- INTERFAZ / PANEL SUPERIOR ---
-st.title("💰 Copiloto Financiero & Portafolio SaaS")
+st.title("💰 Copiloto Financiero & Portafolio")
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Patrimonio Total", f"{patrimonio_total:,.2f} €")
@@ -132,7 +161,7 @@ tab_cuenta, tab_gastos, tab_portafolio, tab_ia = st.tabs([
 # ==========================================
 with tab_cuenta:
     st.subheader("⚙️ Configuración del Balance Base")
-    st.caption("Introduce el saldo de partida inicial en tu cuenta bancaria (sin contar gastos/ingresos posteriores ni inversiones).")
+    st.caption("Introduce el saldo de partida en tu cuenta bancaria (sin incluir gastos/ingresos registrados ni inversiones).")
     
     col_bal1, col_bal2 = st.columns([2, 1])
     with col_bal1:
@@ -225,9 +254,7 @@ with tab_portafolio:
             
         st.dataframe(pd.DataFrame(tabla), use_container_width=True)
         
-        # --- GRÁFICOS INTERACTIVOS ---
         col_g1, col_g2 = st.columns(2)
-        
         with col_g1:
             st.markdown("**Distribución de Inversiones**")
             fig_pie = px.pie(grafico_data, names="Empresa", values="Valor (€)", hole=0.4)
@@ -263,7 +290,7 @@ with tab_ia:
                 client = genai.Client(api_key=api_key)
                 
                 prompt_ia = f"""
-                Eres el motor ejecutor de un SaaS financiero.
+                Eres el motor ejecutor de una app financiera.
                 Analiza la petición del usuario: '{instruccion}'.
                 
                 Responde ÚNICAMENTE con un objeto JSON sin formato extra según el caso:
