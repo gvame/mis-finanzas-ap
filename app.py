@@ -44,39 +44,36 @@ with st.sidebar:
         st.rerun()
     st.divider()
 
-# --- FUNCIONES DE BASE DE DATOS (SEGURAS CONTRA PGRST125) ---
-def cargar_balance_base():
-    try:
-        # Seleccionamos todos los registros y tomamos el último valor insertado
-        res = supabase.table("configuracion").select("*").execute()
-        if res.data:
-            # Buscar si hay alguno con clave 'balance_base'
-            for row in reversed(res.data):
-                if row.get("clave") == "balance_base":
-                    return float(row.get("valor", 0.0))
-            # Si no encuentra la clave pero hay datos, toma el último valor genérico
-            return float(res.data[-1].get("valor", 0.0))
-    except Exception:
-        pass
-    return 0.0
-
-def actualizar_balance_base(nuevo_monto):
-    try:
-        # Método seguro: Insertar un nuevo registro de configuración sin requerir claves primarias restrictivas
-        supabase.table("configuracion").insert({
-            "clave": "balance_base",
-            "valor": float(nuevo_monto)
-        }).execute()
-        st.success("Saldo base actualizado correctamente.")
-    except Exception as e:
-        st.error(f"Error al actualizar balance base: {e}")
-
+# --- FUNCIONES DE BASE DE DATOS (LIBRES DE PGRST125) ---
 def cargar_transacciones():
     try:
         res = supabase.table("transacciones").select("*").execute()
         return res.data or []
     except Exception:
         return []
+
+def cargar_balance_base():
+    try:
+        transacciones = cargar_transacciones()
+        # Buscamos el último saldo inicial registrado en transacciones
+        for t in reversed(transacciones):
+            if t.get("concepto") == "SALDO_INICIAL":
+                return float(t.get("monto", 0.0))
+    except Exception:
+        pass
+    return 0.0
+
+def actualizar_balance_base(nuevo_monto):
+    try:
+        # Guardamos el saldo inicial como un registro especial en transacciones (solo insert, sin errores de PK)
+        supabase.table("transacciones").insert({
+            "concepto": "SALDO_INICIAL",
+            "monto": float(nuevo_monto),
+            "tipo": "Config"
+        }).execute()
+        st.success("Saldo base actualizado correctamente.")
+    except Exception as e:
+        st.error(f"Error al actualizar balance base: {e}")
 
 def cargar_activos():
     try:
@@ -140,11 +137,12 @@ def obtener_precio_eur(ticker_code):
         return None
 
 # --- CARGA INICIAL DE DATOS ---
-balance_base = cargar_balance_base()
 transacciones = cargar_transacciones()
+balance_base = cargar_balance_base()
 activos = cargar_activos()
 
 # --- CÁLCULOS MÉTRICOS PRINCIPALES ---
+# Filtramos para que los movimientos de tipo "Config" (Saldo Inicial) no alteren los ingresos/gastos normales
 total_ingresos = sum(t.get("monto", 0) for t in transacciones if t.get("tipo") == "Ingreso")
 total_gastos = sum(t.get("monto", 0) for t in transacciones if t.get("tipo") == "Gasto")
 efectivo_disponible = balance_base + total_ingresos - total_gastos
@@ -218,8 +216,10 @@ with tab_gastos:
 
     st.divider()
     st.subheader("📊 Historial de Transacciones")
-    if transacciones:
-        df_trans = pd.DataFrame(transacciones)
+    # Filtramos para mostrar solo los movimientos reales de gastos/ingresos (ocultando las configuraciones internas)
+    transacciones_visibles = [t for t in transacciones if t.get("tipo") != "Config"]
+    if transacciones_visibles:
+        df_trans = pd.DataFrame(transacciones_visibles)
         columnas_mostrar = [c for c in ["id", "created_at", "concepto", "monto", "tipo"] if c in df_trans.columns]
         st.dataframe(df_trans[columnas_mostrar], use_container_width=True)
     else:
@@ -359,7 +359,7 @@ with tab_ia:
                     actualizar_balance_base(data["monto"])
                     st.success(f"IA: Saldo base actualizado a {data['monto']} €.")
                 else:
-                    st.info(data.get(value=""))
+                    st.info(data.get("respuesta", ""))
                     
                 st.rerun()
             except Exception as e:
