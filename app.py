@@ -6,6 +6,7 @@ import json
 import plotly.express as px
 from datetime import date, datetime
 from supabase import create_client, Client
+import io
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Copiloto Financiero SaaS", page_icon="💰", layout="wide")
@@ -103,7 +104,6 @@ def agregar_activo_db(ticker, nombre, acciones, precio_compra, tipo_activo="Acci
             "interes_tae": float(interes_tae)
         }).execute()
     except Exception:
-        # Fallback si alguna columna extendida no existe en Supabase
         try:
             supabase.table("activos").insert({
                 "ticker": ticker,
@@ -160,7 +160,6 @@ efectivo_disponible = balance_base + total_ingresos - total_gastos
 
 valor_portafolio_actual = 0.0
 total_invertido = 0.0
-
 hoy = date.today()
 
 for a in activos:
@@ -179,8 +178,8 @@ for a in activos:
         ganancia_dep = 0.0
         if f_ini_str and f_fin_str:
             try:
-                f_ini = datetime.strptime(f_ini_str.split()[0], "%Y-%m-%d").date()
-                f_fin = datetime.strptime(f_fin_str.split()[0], "%Y-%m-%d").date()
+                f_ini = datetime.strptime(str(f_ini_str).split()[0], "%Y-%m-%d").date()
+                f_fin = datetime.strptime(str(f_fin_str).split()[0], "%Y-%m-%d").date()
                 total_dias = (f_fin - f_ini).days
                 dias_transcurridos = (hoy - f_ini).days
                 dias_transcurridos = max(0, min(dias_transcurridos, total_dias))
@@ -224,8 +223,6 @@ tab_cuenta, tab_gastos, tab_inversiones, tab_ia = st.tabs([
 # ==========================================
 with tab_cuenta:
     st.subheader("⚙️ Configuración del Capital Inicial")
-    st.caption("Introduce el saldo de partida en tu cuenta bancaria para fijar el efectivo base.")
-    
     col_bal1, col_bal2 = st.columns([2, 1])
     with col_bal1:
         nuevo_balance = st.number_input("Capital Inicial de la Cuenta (€):", value=balance_base, min_value=0.0, step=100.0)
@@ -266,80 +263,122 @@ with tab_gastos:
         st.info("No hay gastos ni ingresos registrados.")
 
 # ==========================================
-# 3. INVERSIONES (Acciones, Fondos y Depósitos)
+# 3. INVERSIONES (Acciones, Fondos, Depósitos + Importación Masiva)
 # ==========================================
 with tab_inversiones:
-    st.subheader("🏢 Gestión de Inversiones en Tiempo Real")
+    st.subheader("🏢 Gestión y Carga de Inversiones")
     
-    tipo_seleccionado = st.radio("Selecciona el tipo de activo a añadir:", ["Acción / ETF", "Fondo Indexado", "Depósito Bancario"], horizontal=True)
+    opcion_carga = st.selectbox("Elige método de incorporación:", ["➕ Añadir Individualmente", "📁 Importación Masiva (Excel / CSV)"])
     st.divider()
     
-    if tipo_seleccionado == "Acción / ETF":
-        busqueda = st.text_input("Buscar Acción o ETF (ej: Apple, Microsoft, S&P 500):", value="Apple")
-        if busqueda:
-            opciones = buscar_coincidencias(busqueda)
-            if opciones:
-                dict_opciones = {f"{item['name']} ({item['symbol']}) - {item['exchange']}": item for item in opciones}
-                seleccion = st.selectbox("Selecciona activo verificado:", list(dict_opciones.keys()))
-                activo_elegido = dict_opciones[seleccion]
+    if opcion_carga == "📁 Importación Masiva (Excel / CSV)":
+        st.markdown("### 📥 Sube tu cartera de golpe")
+        st.caption("Sube un archivo Excel (.xlsx) o CSV con las columnas: `tipo_activo`, `ticker`, `nombre`, `acciones`, `precio_compra`")
+        
+        df_plantilla = pd.DataFrame([
+            {"tipo_activo": "Acción/ETF", "ticker": "AAPL", "nombre": "Apple Inc.", "acciones": 10.0, "precio_compra": 150.0},
+            {"tipo_activo": "Fondo Indexado", "ticker": "IE00B4L5Y983", "nombre": "Vanguard Global Stock", "acciones": 25.5, "precio_compra": 110.0},
+            {"tipo_activo": "Depósito", "ticker": "DEPOSITO", "nombre": "Depósito Wizink", "acciones": 5000.0, "precio_compra": 1.0}
+        ])
+        
+        buffer = io.BytesIO()
+        df_plantilla.to_excel(buffer, index=False)
+        buffer.seek(0)
+        
+        st.download_button(
+            label="⬇️ Descargar Plantilla de Ejemplo (.xlsx)",
+            data=buffer,
+            file_name="plantilla_inversiones.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        
+        archivo_subido = st.file_uploader("Sube tu archivo completado:", type=["xlsx", "csv"])
+        if archivo_subido is not None:
+            try:
+                if archivo_subido.name.endswith('.csv'):
+                    df_subida = pd.read_csv(archivo_subido)
+                else:
+                    df_subida = pd.read_excel(archivo_subido)
                 
-                c_acc, c_prec = st.columns(2)
-                with c_acc:
-                    num_acc = st.number_input("Nº Acciones:", min_value=0.001, value=1.0)
-                with c_prec:
-                    prec_c = st.number_input("Precio compra medio (€):", min_value=0.0, value=150.0)
-                    
-                if st.button("Añadir Acción/ETF", use_container_width=True):
-                    agregar_activo_db(activo_elegido["symbol"], activo_elegido["name"], num_acc, prec_c, "Acción/ETF")
-                    st.success(f"Añadido {activo_elegido['name']} correctamente.")
+                if st.button("🚀 Procesar e Insertar Cartera en Supabase", type="primary"):
+                    for _, row in df_subida.iterrows():
+                        agregar_activo_db(
+                            ticker=str(row.get("ticker", "MANUAL")),
+                            nombre=str(row.get("nombre", "Activo")),
+                            acciones=float(row.get("acciones", 0)),
+                            precio_compra=float(row.get("precio_compra", 0)),
+                            tipo_activo=str(row.get("tipo_activo", "Acción/ETF"))
+                        )
+                    st.success("¡Toda la cartera ha sido importada con éxito!")
                     st.rerun()
-
-    elif tipo_seleccionado == "Fondo Indexado":
-        st.caption("Añade tu fondo indexado (búscalo en Yahoo Finance por nombre/ISIN o configúralo en tiempo real).")
-        f_busqueda = st.text_input("Buscar Fondo en Yahoo Finance (ej: Vanguard, MSCI World, IE00B4L5Y983):", value="Vanguard Global Stock")
-        
-        f_ticker_final = "FONDO_MANUAL"
-        f_nombre_final = f_busqueda
-        
-        if f_busqueda:
-            opciones_fondo = buscar_coincidencias(f_busqueda)
-            if opciones_fondo:
-                dict_f = {f"{item['name']} ({item['symbol']})": item for item in opciones_fondo}
-                sel_f = st.selectbox("Selecciona fondo verificado de mercado:", list(dict_f.keys()))
-                f_ticker_final = dict_f[sel_f]["symbol"]
-                f_nombre_final = dict_f[sel_f]["name"]
-                
-        c_part, c_vl = st.columns(2)
-        with c_part:
-            num_part = st.number_input("Número de Participaciones:", min_value=0.001, value=10.0)
-        with c_vl:
-            val_liq = st.number_input("Valor Liquidativo / Coste Medio (€):", min_value=0.0, value=100.0)
-            
-        if st.button("Añadir Fondo Indexado", use_container_width=True):
-            agregar_activo_db(f_ticker_final, f_nombre_final, num_part, val_liq, "Fondo Indexado")
-            st.success(f"Añadido fondo {f_nombre_final} en tiempo real.")
-            st.rerun()
+            except Exception as e:
+                st.error(f"Error al leer el archivo: {e}")
 
     else:
-        st.caption("Registra tus depósitos a plazo fijo con cálculo temporal automatizado.")
-        d_nombre = st.text_input("Nombre del Depósito (ej: Depósito Wizink 12M):", value="Depósito Plazo Fijo")
-        d_capital = st.number_input("Capital Invertido (€):", min_value=0.0, value=5000.0)
-        d_interes = st.number_input("Interés Anual (% TAE):", min_value=0.0, value=3.0)
+        tipo_seleccionado = st.radio("Tipo de activo:", ["Acción / ETF", "Fondo Indexado", "Depósito Bancario"], horizontal=True)
+        st.write("")
         
-        c_d1, c_d2 = st.columns(2)
-        with c_d1:
-            f_inicio = st.date_input("Fecha de Inicio:", value=date.today())
-        with c_d2:
-            f_fin = st.date_input("Fecha de Vencimiento / Fin:", value=date(date.today().year + 1, date.today().month, date.today().day))
+        if tipo_seleccionado == "Acción / ETF":
+            busqueda = st.text_input("Buscar Acción o ETF:", value="Apple")
+            if busqueda:
+                opciones = buscar_coincidencias(busqueda)
+                if opciones:
+                    dict_opciones = {f"{item['name']} ({item['symbol']}) - {item['exchange']}": item for item in opciones}
+                    seleccion = st.selectbox("Selecciona activo:", list(dict_opciones.keys()))
+                    activo_elegido = dict_opciones[seleccion]
+                    
+                    c_acc, c_prec = st.columns(2)
+                    with c_acc:
+                        num_acc = st.number_input("Nº Acciones:", min_value=0.001, value=1.0)
+                    with c_prec:
+                        prec_c = st.number_input("Precio compra medio (€):", min_value=0.0, value=150.0)
+                        
+                    if st.button("Añadir Acción/ETF", use_container_width=True):
+                        agregar_activo_db(activo_elegido["symbol"], activo_elegido["name"], num_acc, prec_c, "Acción/ETF")
+                        st.success("Añadido correctamente.")
+                        st.rerun()
+
+        elif tipo_seleccionado == "Fondo Indexado":
+            f_busqueda = st.text_input("Buscar Fondo (nombre o ISIN):", value="Vanguard")
+            f_ticker_final = "FONDO_MANUAL"
+            f_nombre_final = f_busqueda
             
-        if st.button("Añadir Depósito", use_container_width=True):
-            agregar_activo_db("DEPOSITO", d_nombre, d_capital, 1.0, "Depósito", fecha_inicio=f_inicio, fecha_fin=f_fin, interes_tae=d_interes)
-            st.success(f"Añadido depósito {d_nombre} correctamente.")
-            st.rerun()
+            if f_busqueda:
+                opciones_fondo = buscar_coincidencias(f_busqueda)
+                if opciones_fondo:
+                    dict_f = {f"{item['name']} ({item['symbol']})": item for item in opciones_fondo}
+                    sel_f = st.selectbox("Selecciona fondo:", list(dict_f.keys()))
+                    f_ticker_final = dict_f[sel_f]["symbol"]
+                    f_nombre_final = dict_f[sel_f]["name"]
+                    
+            c_part, c_vl = st.columns(2)
+            with c_part:
+                num_part = st.number_input("Nº Participaciones:", min_value=0.001, value=10.0)
+            with c_vl:
+                val_liq = st.number_input("Valor Liquidativo Medio (€):", min_value=0.0, value=100.0)
+                
+            if st.button("Añadir Fondo Indexado", use_container_width=True):
+                agregar_activo_db(f_ticker_final, f_nombre_final, num_part, val_liq, "Fondo Indexado")
+                st.success("Añadido fondo correctamente.")
+                st.rerun()
+
+        else:
+            d_nombre = st.text_input("Nombre del Depósito:", value="Depósito Plazo Fijo")
+            d_capital = st.number_input("Capital Invertido (€):", min_value=0.0, value=5000.0)
+            d_interes = st.number_input("Interés Anual (% TAE):", min_value=0.0, value=3.0)
+            c_d1, c_d2 = st.columns(2)
+            with c_d1:
+                f_inicio = st.date_input("Fecha Inicio:", value=date.today())
+            with c_d2:
+                f_fin = st.date_input("Fecha Vencimiento:", value=date(date.today().year + 1, date.today().month, date.today().day))
+                
+            if st.button("Añadir Depósito", use_container_width=True):
+                agregar_activo_db("DEPOSITO", d_nombre, d_capital, 1.0, "Depósito", fecha_inicio=f_inicio, fecha_fin=f_fin, interes_tae=d_interes)
+                st.success("Añadido depósito correctamente.")
+                st.rerun()
 
     st.divider()
     
-    # Controles de visualización de rentabilidad (Botón de alternancia %)
     c_inf1, c_inf2 = st.columns([3, 1])
     with c_inf1:
         st.subheader("💼 Desglose de Inversiones Actuales")
@@ -367,8 +406,8 @@ with tab_inversiones:
                 ganancia_dep = 0.0
                 if f_ini_str and f_fin_str:
                     try:
-                        f_ini = datetime.strptime(f_ini_str.split()[0], "%Y-%m-%d").date()
-                        f_fin = datetime.strptime(f_fin_str.split()[0], "%Y-%m-%d").date()
+                        f_ini = datetime.strptime(str(f_ini_str).split()[0], "%Y-%m-%d").date()
+                        f_fin = datetime.strptime(str(f_fin_str).split()[0], "%Y-%m-%d").date()
                         total_dias = (f_fin - f_ini).days
                         dias_transcurridos = (hoy - f_ini).days
                         dias_transcurridos = max(0, min(dias_transcurridos, total_dias))
@@ -393,7 +432,6 @@ with tab_inversiones:
                 gan = val - inv
                 pnl = (gan / inv) * 100 if inv > 0 else 0
                 
-            # Formato de celda con color condicional HTML (Verde beneficio / Rojo pérdida)
             if modo_rentabilidad == "%":
                 txt_rent = f"{pnl:+.2f}%"
             else:
@@ -439,19 +477,19 @@ with tab_inversiones:
             fig_bar = px.bar(df_patrimonio, x="Tipo", y="Monto", color="Tipo", text_auto=".2f")
             st.plotly_chart(fig_bar, use_container_width=True)
     else:
-        st.info("Añade tus inversiones para visualizar el desglose en tiempo real.")
+        st.info("Añade tus inversiones de forma manual, por IA o subiendo una plantilla Excel para empezar.")
 
 # ==========================================
-# 4. ASESOR IA EJECUTOR
+# 4. ASESOR IA EJECUTOR (DICTA TU CARTERA AQUÍ)
 # ==========================================
 with tab_ia:
-    st.subheader("🤖 Pídele a la IA que gestione tu app")
-    st.caption("Ejemplos: 'Apunta un gasto de 40 euros en supermercado' o 'Establece mi capital inicial en 3000 euros'.")
+    st.subheader("🤖 Asistente IA Dictador de Cartera")
+    st.caption("Escribe en lenguaje natural lo que tienes invertido y la IA lo estructurará, buscará los tickers y lo guardará sola en tu base de datos.")
     
     api_key = st.secrets.get("GEMINI_API_KEY", "")
-    instruccion = st.text_area("Instrucción para la IA:")
+    instruccion = st.text_area("Cuéntale a la IA tus movimientos o cartera:", placeholder="Ejemplo: Tengo 10 acciones de Apple a 150€, 20 participaciones de un fondo Vanguard S&P 500 a 100€, y un depósito de 4000€ al 2.5%...")
     
-    if st.button("Ejecutar Instrucción", use_container_width=True) and instruccion:
+    if st.button("Ejecutar con IA", use_container_width=True) and instruccion:
         if not api_key:
             st.error("Configura tu GEMINI_API_KEY en Secrets.")
         else:
@@ -460,17 +498,35 @@ with tab_ia:
                 client = genai.Client(api_key=api_key)
                 
                 prompt_ia = f"""
-                Eres el motor ejecutor de una app financiera.
-                Analiza la petición del usuario: '{instruccion}'.
+                Eres el motor ejecutor y experto financiero de una app. Analiza la petición del usuario: '{instruccion}'.
+                El usuario puede querer registrar un gasto, un ingreso, cambiar el capital inicial, o añadir uno o varios activos de inversión.
                 
-                Responde ÚNICAMENTE con un objeto JSON sin formato extra según el caso:
-                1. Registro de gasto/ingreso:
-                {{"accion": "movimiento", "concepto": "concepto", "monto": numero, "tipo": "Gasto" or "Ingreso"}}
+                Debes interpretar la petición y responder ÚNICAMENTE con un JSON puro (sin bloques de código markdown extra tipo ```json) con esta estructura:
                 
-                2. Cambiar capital inicial:
-                {{"accion": "saldo_base", "monto": numero}}
+                Si es un movimiento de gasto/ingreso:
+                {{"accion": "movimiento", "concepto": "...", "monto": 0.0, "tipo": "Gasto" or "Ingreso"}}
                 
-                3. Consulta normal:
+                Si es para cambiar el saldo base inicial:
+                {{"accion": "saldo_base", "monto": 0.0}}
+                
+                Si es para añadir una o varias inversiones (puede ser una lista):
+                {{
+                  "accion": "inversion",
+                  "items": [
+                    {{
+                      "tipo_activo": "Acción/ETF" o "Fondo Indexado" o "Depósito",
+                      "ticker": "Ticker de Yahoo Finance si lo conoces (ej AAPL, MSFT) o busca uno lógico, si es depósito pon DEPOSITO",
+                      "nombre": "Nombre descriptivo",
+                      "acciones": numero_de_acciones_o_participaciones_o_capital_en_deposito,
+                      "precio_compra": precio_medio_o_1_si_es_deposito,
+                      "fecha_inicio": "YYYY-MM-DD o null si no aplica",
+                      "fecha_fin": "YYYY-MM-DD o null si no aplica",
+                      "interes_tae": 0.0
+                    }}
+                  ]
+                }}
+                
+                Si es una simple pregunta o consulta general:
                 {{"accion": "consulta", "respuesta": "texto de respuesta"}}
                 """
                 
@@ -482,15 +538,30 @@ with tab_ia:
                 texto_limpio = res.text.replace("```json", "").replace("```", "").strip()
                 data = json.loads(texto_limpio)
                 
-                if data.get("accion") == "movimiento":
+                accion = data.get("accion")
+                if accion == "movimiento":
                     registrar_movimiento_db(data["concepto"], data["monto"], data["tipo"])
                     st.success(f"IA: Registrado {data['tipo']} de {data['monto']} € en '{data['concepto']}'.")
-                elif data.get("accion") == "saldo_base":
+                elif accion == "saldo_base":
                     actualizar_balance_base(data["monto"])
                     st.success(f"IA: Capital inicial actualizado a {data['monto']} €.")
+                elif accion == "inversion":
+                    items = data.get("items", [])
+                    for it in items:
+                        agregar_activo_db(
+                            ticker=it.get("ticker", "MANUAL"),
+                            nombre=it.get("nombre", "Activo"),
+                            acciones=float(it.get("acciones", 0)),
+                            precio_compra=float(it.get("precio_compra", 0)),
+                            tipo_activo=it.get("tipo_activo", "Acción/ETF"),
+                            fecha_inicio=it.get("fecha_inicio"),
+                            fecha_fin=it.get("fecha_fin"),
+                            interes_tae=float(it.get("interes_tae", 0.0))
+                        )
+                    st.success(f"¡IA: Se han añadido con éxito {len(items)} activos/inversiones a tu portafolio!")
                 else:
                     st.info(data.get("respuesta", ""))
                     
                 st.rerun()
             except Exception as e:
-                st.error(f"Error de ejecución IA: {e}")
+                st.error(f"Error procesando la instrucción con IA: {e}")
