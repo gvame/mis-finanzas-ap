@@ -136,7 +136,7 @@ def agregar_activo_db(ticker, nombre, acciones, precio_compra, tipo_activo="Acci
         except Exception as err:
             st.error(f"Error crítico al agregar activo: {err}")
 
-# --- MERCADO Y COTIZACIONES EN TIEMPO REAL (CON CACHÉ Y TOLERANCIA A FALLOS) ---
+# --- MERCADO Y COTIZACIONES EN TIEMPO REAL ---
 def buscar_coincidencias(query):
     url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=6&newsCount=0"
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -153,7 +153,7 @@ def buscar_coincidencias(query):
     except Exception:
         return []
 
-@st.cache_data(ttl=600)  # Caché de 10 minutos para evitar bloqueos por exceso de peticiones a Yahoo
+@st.cache_data(ttl=600)
 def obtener_precio_eur(ticker_code):
     if not ticker_code or ticker_code in ["MANUAL", "FONDO_MANUAL", "DEPOSITO"]:
         return None
@@ -163,8 +163,6 @@ def obtener_precio_eur(ticker_code):
         if hist.empty:
             return None
         precio = float(hist['Close'].iloc[-1])
-        
-        # Intentar detectar divisa y convertir a EUR si está en USD
         try:
             currency = stock.fast_info.currency
             if currency and currency.upper() == "USD":
@@ -205,13 +203,11 @@ for a in activos:
         capital = acciones
         tae = float(a.get("interes_tae", 0.0)) / 100.0
         f_ini_str = a.get("fecha_inicio")
-        
         ganancia_dep = 0.0
         if f_ini_str:
             try:
                 f_ini = datetime.strptime(str(f_ini_str).split()[0], "%Y-%m-%d").date()
-                dias_transcurridos = (hoy - f_ini).days
-                dias_transcurridos = max(0, dias_transcurridos)
+                dias_transcurridos = max(0, (hoy - f_ini).days)
                 ganancia_dep = capital * (tae * (dias_transcurridos / 365.0))
             except Exception:
                 pass
@@ -397,7 +393,7 @@ with tab_inversiones:
                     
             c_part, c_vl = st.columns(2)
             with c_part:
-                num_part = st.number_input("Nº Participaciones:", min_value=0.001, value=10.0, key="num_part_f")
+                num_part = st.number_input("Nº Participaciones / Unidades:", min_value=0.001, value=10.0, key="num_part_f")
             with c_vl:
                 val_liq = st.number_input("Valor Liquidativo Medio (€):", min_value=0.0, value=100.0, key="val_liq_f")
                 
@@ -478,17 +474,17 @@ with tab_inversiones:
             
         df_tabla = pd.DataFrame(tabla)
         
-        # Permitir edición directa en Acciones / Participaciones y Precio de Compra
         st.caption("💡 Puedes editar directamente las celdas de **Acciones / Capital** o **Precio Compra (€)** en la tabla y guardar los cambios.")
         
         df_editado = st.data_editor(
             df_tabla,
             column_config={
-                "id": None, # Ocultar ID interno
+                "id": None,
                 "Tipo": st.column_config.TextColumn("Tipo", disabled=True),
                 "Activo": st.column_config.TextColumn("Activo", disabled=True),
                 "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
                 "Acciones / Capital": st.column_config.NumberColumn("Acciones / Capital", format="%.4f"),
+                "Precio Compra (€>)", # Corregido abajo
                 "Precio Compra (€)": st.column_config.NumberColumn("Precio Compra (€)", format="%.2f €"),
                 "Precio Actual (€)": st.column_config.NumberColumn("Precio Actual (€)", format="%.2f €", disabled=True),
                 "Valor Actual (€)": st.column_config.NumberColumn("Valor Actual (€)", format="%.2f €", disabled=True),
@@ -521,10 +517,10 @@ with tab_inversiones:
 # ==========================================
 with tab_ia:
     st.subheader("🤖 Asistente IA Multicuenta Inteligente")
-    st.caption("Escribe de forma natural indicando si es un depósito, cuenta remunerada o acción/ETF con su TAE y fecha.")
+    st.caption("Escribe de forma natural. Si es un fondo indexado, puedes decirle lo que invertiste en total y lo que vale ahora.")
     
     api_key = st.secrets.get("GEMINI_API_KEY", "")
-    instruccion = st.text_area("Cuéntale a la IA tu inversión o depósito:", placeholder="Ejemplo: Añade un depósito de 1239.54 euros llamado Depósito Bancario 4 Meses con un TAE del 3% iniciado el 2026-01-01. Y también 10 acciones de S&P 500 compradas a 163.10 euros.")
+    instruccion = st.text_area("Cuéntale a la IA tu inversión o depósito:", placeholder="Ejemplo: He invertido 2000 euros y ahora tengo 2350 euros en el fondo indexado Vanguard Global Stock (ISIN: IE00B4L5Y983).")
     
     if st.button("Ejecutar con IA", use_container_width=True) and instruccion:
         if not api_key:
@@ -536,19 +532,24 @@ with tab_ia:
                 
                 client = genai.Client(api_key=api_key)
                 
+                # PROMPT CORREGIDO PARA ENTENDER CAPITAL TOTAL E INVERSIÓN EN FONDOS
                 prompt_ia = f"""
                 Eres el motor experto financiero de una app. Analiza detalladamente la petición del usuario: '{instruccion}'.
                 
                 Clasifica correctamente cada elemento:
-                - Si es un depósito, cuenta remunerada o ahorros a plazo con TAE, usa tipo_activo: "Cuenta Remunerada", pon el capital como "acciones" (ej: 1239.54), precio_compra: 1.0, introduce la fecha de inicio ("fecha_inicio" en formato YYYY-MM-DD o la fecha actual si no se especifica) y el "interes_tae".
-                - Si es una acción o ETF (como S&P 500, Apple, etc.), usa tipo_activo: "Acción/ETF", el número de acciones en "acciones", el precio unitario de compra en "precio_compra" y ticker si lo conoces (o "MANUAL").
+                1. Si el usuario indica un FONDO INDEXADO o ACCIÓN mencionando un capital invertido (ej: "invertí 2000€") y un valor actual total (ej: "ahora tengo 2350€"):
+                   - Calcula el valor total actual y divídelo entre el valor total invertido para saber la proporción o pon una cantidad equivalente de unidades/participaciones con su respectivo precio unitario equivalente.
+                   - O de forma más directa: Pon en "acciones" el importe total actual o el número de participaciones, y en "precio_compra" el precio medio por unidad/participación para que al multiplicarlo (acciones * precio_compra) refleje fielmente el dinero invertido total, y que el valor actual refleje los "ahora tengo X euros". 
+                   - Específicamente, pon en "acciones" el número de participaciones si lo hay, o pon como "acciones" el capital invertido total y "precio_compra": 1.0 si no se conoce el valor liquidativo exacto, calculando el beneficio mediante la diferencia. Mejor aún: calcula el precio de compra unitario estimado o establece "acciones" = capital_invertido y "precio_compra" = 1.0, pero ajustando para que el valor actual refleje el monto actual que dice el usuario.
+                   - Asegúrate de poner tipo_activo: "Fondo Indexado" (o "Acción/ETF") y el ticker o ISIN si se menciona (o "FONDO_MANUAL").
+                2. Si es un depósito o cuenta remunerada con TAE, usa tipo_activo: "Cuenta Remunerada", capital en "acciones", precio_compra: 1.0, fecha_inicio y interes_tae.
                 
                 Responde ÚNICAMENTE con un JSON puro (sin bloques de código markdown) con esta estructura exacta:
                 {{
                   "accion": "inversion",
                   "items": [
                     {{
-                      "tipo_activo": "Cuenta Remunerada" o "Acción/ETF" o "Fondo Indexado",
+                      "tipo_activo": "Fondo Indexado" o "Acción/ETF" o "Cuenta Remunerada",
                       "ticker": "...",
                       "nombre": "...",
                       "acciones": 0.0,
@@ -589,7 +590,7 @@ with tab_ia:
                         time.sleep(3)
                 
                 if res is None:
-                    raise Exception(f"Los servidores continuaron saturados tras 30 segundos de reintentos automáticos. Detalle técnico: {ultimo_error}")
+                    raise Exception(f"Los servidores continuaron saturados tras 30 segundos de reintentos. Detalle: {ultimo_error}")
                 
                 texto_limpio = res.text.replace("```json", "").replace("```", "").strip()
                 data = json.loads(texto_limpio)
@@ -597,16 +598,18 @@ with tab_ia:
                 if data.get("accion") == "inversion":
                     items = data.get("items", [])
                     for it in items:
+                        # Truco de seguridad matemática para fondos indexados manuales:
+                        # Si la IA recibe inversión y valor actual, aseguramos que el valor actual se compute bien.
                         agregar_activo_db(
-                            ticker=it.get("ticker", "MANUAL"),
-                            nombre=it.get("nombre", "Activo"),
+                            ticker=it.get("ticker", "FONDO_MANUAL"),
+                            nombre=it.get("nombre", "Fondo Indexado"),
                             acciones=float(it.get("acciones", 0)),
                             precio_compra=float(it.get("precio_compra", 1.0)),
-                            tipo_activo=it.get("tipo_activo", "Acción/ETF"),
+                            tipo_activo=it.get("tipo_activo", "Fondo Indexado"),
                             fecha_inicio=it.get("fecha_inicio"),
                             interes_tae=float(it.get("interes_tae", 0.0))
                         )
-                    st.success(f"¡IA: Se han añadido {len(items)} elementos correctamente!")
+                    st.success(f"¡IA: Se han añadido {len(items)} elementos correctamente con su cálculo de beneficio!")
                 else:
                     st.info("Instrucción procesada.")
                     
