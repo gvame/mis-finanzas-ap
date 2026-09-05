@@ -2,3 +2,6 @@ streamlit
 pandas
 yfinance
 google-genai
+requests
+supabase
+plotly
