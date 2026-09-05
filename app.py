@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
+import requests
 
 # Configuración de la página
 st.set_page_config(page_title="Copiloto Financiero & Inversión", page_icon="💰", layout="wide")
@@ -12,10 +13,29 @@ if "transacciones" not in st.session_state:
     st.session_state.transacciones = []
 
 if "mis_activos" not in st.session_state:
-    # Cargar por defecto solo 1 activo de prueba editable
     st.session_state.mis_activos = [
         {"Ticker": "GOOGL", "Nombre": "Alphabet Inc.", "Acciones": 2.0, "Precio_Compra": 150.0}
     ]
+
+# Función para buscar el Ticker exacto a partir del nombre comercial
+def buscar_ticker(nombre_busqueda):
+    url = f"https://query2.finance.yahoo.com/v1/finance/search?q={nombre_busqueda}&quotesCount=5&newsCount=0"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    try:
+        response = requests.get(url, headers=headers)
+        datos = response.json()
+        quotes = datos.get('quotes', [])
+        
+        if quotes:
+            for q in quotes:
+                if q.get('quoteType') in ['EQUITY', 'ETF']:
+                    return q.get('symbol'), q.get('longname', q.get('shortname', nombre_busqueda))
+            return quotes[0].get('symbol'), quotes[0].get('shortname', nombre_busqueda)
+    except Exception as e:
+        st.error(f"Error al conectar con el servicio de búsqueda: {e}")
+    
+    return None, None
 
 tab1, tab2, tab3 = st.tabs(["⚡ Registro Gastos/Ingresos", "📈 Portafolio & Empresas Dinámicas", "🤖 Asesor IA"])
 
@@ -56,34 +76,33 @@ with tab1:
 # PESTAÑA 2: PORTAFOLIO DINÁMICO & BOLSAS
 # ==========================================
 with tab2:
-    st.subheader("🏢 Buscador y Agregador de Empresas / ETFs")
-    st.caption("Añade cualquier empresa (ej. GOOGL, AAPL, MSFT, SAN.MC) para incluirla en tu panel.")
+    st.subheader("🏢 Buscador y Agregador Inteligente de Empresas / ETFs")
+    st.caption("Escribe el nombre de cualquier empresa (ej: AeroVironment, Alphabet, Apple) o su Ticker (ej: AVAV, GOOGL, AAPL).")
 
-    # Formulario para agregar nuevo activo por Ticker
+    # Formulario dinámico con búsqueda por nombre
     with st.expander("➕ Añadir nueva empresa o ETF al panel", expanded=True):
-        col_t, col_a, col_p = st.columns([2, 1, 1])
-        with col_t:
-            nuevo_ticker = st.text_input("Ticker oficial (ej: GOOGL, MSFT, NVDA, SAN.MC):", value="").upper().strip()
-        with col_a:
-            num_acciones = st.number_input("Nº de Títulos / Acciones:", min_value=0.001, value=1.0, step=1.0)
-        with col_p:
-            precio_compra = st.number_input("Precio medio de compra ($/€):", min_value=0.0, value=100.0, step=10.0)
+        col_busqueda, col_acciones, col_precio = st.columns([2, 1, 1])
+        
+        with col_busqueda:
+            entrada_empresa = st.text_input("Nombre o Ticker de la empresa:", value="AeroVironment")
+        with col_acciones:
+            num_acciones = st.number_input("Nº de Acciones:", min_value=0.001, value=1.0, step=1.0)
+        with col_precio:
+            precio_compra = st.number_input("Precio medio compra ($/€):", min_value=0.0, value=100.0, step=10.0)
             
-        if st.button("Añadir Activo al Panel") and nuevo_ticker:
-            try:
-                # Verificar con yfinance si el ticker existe
-                datos_ticker = yf.Ticker(nuevo_ticker)
-                nombre_empresa = datos_ticker.info.get("shortName", nuevo_ticker)
-                
+        if st.button("Buscar y Añadir al Portafolio", use_container_width=True) and entrada_empresa:
+            ticker_encontrado, nombre_completo = buscar_ticker(entrada_empresa)
+            
+            if ticker_encontrado:
                 st.session_state.mis_activos.append({
-                    "Ticker": nuevo_ticker,
-                    "Nombre": nombre_empresa,
+                    "Ticker": ticker_encontrado,
+                    "Nombre": nombre_completo,
                     "Acciones": num_acciones,
                     "Precio_Compra": precio_compra
                 })
-                st.success(f"¡Añadido {nombre_empresa} ({nuevo_ticker}) al panel!")
-            except Exception as e:
-                st.error("No se pudo encontrar el Ticker. Verifica que esté bien escrito.")
+                st.success(f"¡Añadido con éxito! **{nombre_completo}** (`{ticker_encontrado}`)")
+            else:
+                st.error("No se encontró ninguna empresa que coincida con esa búsqueda.")
 
     st.divider()
     st.subheader("💼 Tu Portafolio en Tiempo Real")
@@ -94,11 +113,10 @@ with tab2:
         for item in st.session_state.mis_activos:
             ticker_code = item["Ticker"]
             try:
-                # Obtener cotización en vivo
                 stock_data = yf.Ticker(ticker_code)
                 precio_actual = stock_data.fast_info.last_price
             except:
-                precio_actual = item["Precio_Compra"] # Fallback si no hay red
+                precio_actual = item["Precio_Compra"]
                 
             inversion_inicial = item["Acciones"] * item["Precio_Compra"]
             valor_actual = item["Acciones"] * precio_actual
