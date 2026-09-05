@@ -44,34 +44,43 @@ with st.sidebar:
         st.rerun()
     st.divider()
 
-# --- FUNCIONES DE BASE DE DATOS ---
-def cargar_transacciones():
-    try:
-        res = supabase.table("transacciones").select("*").execute()
-        return res.data or []
-    except Exception:
-        return []
-
+# --- FUNCIONES DE BASE DE DATOS ROBUSTAS ---
 def cargar_balance_base():
     try:
-        transacciones = cargar_transacciones()
-        for t in reversed(transacciones):
-            if t.get("concepto") == "SALDO_INICIAL":
-                return float(t.get("monto", 0.0))
+        res = supabase.table("configuracion").select("*").execute()
+        if res.data:
+            for row in res.data:
+                if row.get("clave") == "balance_base":
+                    return float(row.get("valor", 0.0))
+            # Si no encuentra la clave exacta, toma el primer valor disponible
+            return float(res.data[0].get("valor", 0.0))
     except Exception:
         pass
     return 0.0
 
 def actualizar_balance_base(nuevo_monto):
     try:
-        supabase.table("transacciones").insert({
-            "concepto": "SALDO_INICIAL",
-            "monto": float(nuevo_monto),
-            "tipo": "Config"
+        # 1. Intentamos vaciar la tabla configuración para evitar duplicados o conflictos de ID
+        supabase.table("configuracion").delete().neq("valor", -999999).execute()
+    except Exception:
+        pass
+    
+    try:
+        # 2. Insertamos el nuevo saldo base de forma limpia
+        supabase.table("configuracion").insert({
+            "clave": "balance_base",
+            "valor": float(nuevo_monto)
         }).execute()
         st.success("Saldo base actualizado correctamente.")
     except Exception as e:
         st.error(f"Error al actualizar balance base: {e}")
+
+def cargar_transacciones():
+    try:
+        res = supabase.table("transacciones").select("*").execute()
+        return res.data or []
+    except Exception:
+        return []
 
 def cargar_activos():
     try:
@@ -135,8 +144,8 @@ def obtener_precio_eur(ticker_code):
         return None
 
 # --- CARGA INICIAL DE DATOS ---
-transacciones = cargar_transacciones()
 balance_base = cargar_balance_base()
+transacciones = cargar_transacciones()
 activos = cargar_activos()
 
 # --- CÁLCULOS MÉTRICOS PRINCIPALES ---
@@ -213,9 +222,8 @@ with tab_gastos:
 
     st.divider()
     st.subheader("📊 Historial de Transacciones")
-    transacciones_visibles = [t for t in transacciones if t.get("tipo") != "Config"]
-    if transacciones_visibles:
-        df_trans = pd.DataFrame(transacciones_visibles)
+    if transacciones:
+        df_trans = pd.DataFrame(transacciones)
         columnas_mostrar = [c for c in ["id", "created_at", "concepto", "monto", "tipo"] if c in df_trans.columns]
         st.dataframe(df_trans[columnas_mostrar], use_container_width=True)
     else:
