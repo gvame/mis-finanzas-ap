@@ -44,11 +44,11 @@ with st.sidebar:
         st.rerun()
     st.divider()
 
-# --- FUNCIONES DE BASE DE DATOS (PROTEGIDAS CONTRA APIERROR) ---
+# --- FUNCIONES DE BASE DE DATOS (SUPABASE) ---
 def cargar_balance_base():
     try:
         res = supabase.table("configuracion").select("valor").eq("clave", "balance_base").execute()
-        if res.data:
+        if res.data and len(res.data) > 0:
             return float(res.data[0]["valor"])
     except Exception:
         pass
@@ -56,11 +56,11 @@ def cargar_balance_base():
 
 def actualizar_balance_base(nuevo_monto):
     try:
-        res = supabase.table("configuracion").select("*").eq("clave", "balance_base").execute()
-        if res.data:
-            supabase.table("configuracion").update({"valor": float(nuevo_monto)}).eq("clave", "balance_base").execute()
-        else:
-            supabase.table("configuracion").insert({"clave": "balance_base", "valor": float(nuevo_monto)}).execute()
+        supabase.table("configuracion").upsert(
+            {"clave": "balance_base", "valor": float(nuevo_monto)},
+            on_conflict="clave"
+        ).execute()
+        st.success("Saldo base guardado correctamente.")
     except Exception as e:
         st.error(f"Error al actualizar balance base: {e}")
 
@@ -192,7 +192,6 @@ with tab_cuenta:
         st.write("")
         if st.button("Actualizar Saldo Base", use_container_width=True):
             actualizar_balance_base(nuevo_balance)
-            st.success("Saldo base actualizado.")
             st.rerun()
 
 # ==========================================
