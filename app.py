@@ -56,12 +56,11 @@ def cargar_transacciones():
         return []
 
 def cargar_saldos_cuentas():
-    """Carga los saldos base configurados para cada cuenta."""
     try:
         res = supabase.table("transacciones").select("*").eq("tipo", "Config_Cuenta").execute()
         saldos = {"Cuenta Nómina": 0.0, "Cuenta Naranja": 0.0, "Trade Republic": 0.0}
         for t in res.data or []:
-            concepto = t.get("concepto") # Ej: SALDO_CUENTA_Cuenta Nómina
+            concepto = t.get("concepto")
             for cuenta in saldos.keys():
                 if cuenta in concepto:
                     saldos[cuenta] = float(t.get("monto", 0.0))
@@ -100,6 +99,7 @@ def registrar_movimiento_db(concepto, monto, tipo):
         st.error(f"Error al registrar movimiento: {e}")
 
 def agregar_activo_db(ticker, nombre, acciones, precio_compra, tipo_activo="Acción/ETF", fecha_inicio=None, fecha_fin=None, interes_tae=0.0):
+    # Intentar inserción completa con todas las columnas avanzadas
     try:
         supabase.table("activos").insert({
             "ticker": ticker,
@@ -112,16 +112,16 @@ def agregar_activo_db(ticker, nombre, acciones, precio_compra, tipo_activo="Acci
             "interes_tae": float(interes_tae)
         }).execute()
     except Exception:
+        # Si falla por falta de columnas en Supabase, intentamos insertar solo las básicas
         try:
             supabase.table("activos").insert({
                 "ticker": ticker,
                 "nombre": nombre,
                 "acciones": float(acciones),
-                "precio_compra": float(precio_compra),
-                "tipo_activo": tipo_activo
+                "precio_compra": float(precio_compra)
             }).execute()
         except Exception as err:
-            st.error(f"Error al agregar activo: {err}")
+            st.error(f"Error crítico al agregar activo: {err}")
 
 # --- MERCADO Y COTIZACIONES EN TIEMPO REAL ---
 def buscar_coincidencias(query):
@@ -165,7 +165,6 @@ activos = cargar_activos()
 total_ingresos = sum(t.get("monto", 0) for t in transacciones if t.get("tipo") == "Ingreso")
 total_gastos = sum(t.get("monto", 0) for t in transacciones if t.get("tipo") == "Gasto")
 
-# Efectivo total sumando las 3 cuentas + ingresos/gastos globales
 efectivo_base_total = sum(saldos_cuentas.values())
 efectivo_disponible = efectivo_base_total + total_ingresos - total_gastos
 
@@ -226,12 +225,10 @@ tab_cuenta, tab_gastos, tab_inversiones, tab_ia = st.tabs([
 ])
 
 # ==========================================
-# 1. CUENTAS BANCARIAS (Nómina, Naranja, Trade Republic)
+# 1. CUENTAS BANCARIAS
 # ==========================================
 with tab_cuenta:
     st.subheader("🏦 Estado de tus Cuentas Bancarias")
-    st.caption("Gestiona el saldo inicial o actual de cada una de tus cuentas por separado.")
-    
     col_c1, col_c2, col_c3 = st.columns(3)
     
     with col_c1:
@@ -398,8 +395,6 @@ with tab_inversiones:
     
     if activos:
         tabla = []
-        grafico_tipo_data = {"Acción/ETF": 0.0, "Fondo Indexado": 0.0, "Cuenta Remunerada": 0.0}
-        
         for item in activos:
             p_compra = float(item.get("precio_compra", 0))
             acciones = float(item.get("acciones", 0))
@@ -424,19 +419,16 @@ with tab_inversiones:
                 inv = capital
                 val = capital + ganancia_dep
                 gan = ganancia_dep
-                pnl = (gan / inv) * 100 if inv > 0 else 0
             elif tipo_act == "Fondo Indexado":
                 p_actual = obtener_precio_eur(ticker) if ticker and ticker != "FONDO_MANUAL" else p_compra
                 inv = acciones * p_compra
                 val = acciones * p_actual
                 gan = val - inv
-                pnl = (gan / inv) * 100 if inv > 0 else 0
             else:
                 p_actual = obtener_precio_eur(ticker) or p_compra
                 inv = acciones * p_compra
                 val = acciones * p_actual
                 gan = val - inv
-                pnl = (gan / inv) * 100 if inv > 0 else 0
                 
             txt_rent = f"{gan:+.2f} €"
             color_estilo = "color: #2e7d32; font-weight: bold;" if gan >= 0 else "color: #c62828; font-weight: bold;"
@@ -450,11 +442,6 @@ with tab_inversiones:
                 "Ganancia Generada": rentabilidad_html
             })
             
-            if tipo_act in grafico_tipo_data:
-                grafico_tipo_data[tipo_act] += val
-            else:
-                grafico_tipo_data["Acción/ETF"] += val
-            
         df_tabla = pd.DataFrame(tabla)
         st.markdown(df_tabla.to_html(escape=False, index=False), unsafe_allow_html=True)
     else:
@@ -465,7 +452,7 @@ with tab_inversiones:
 # ==========================================
 with tab_ia:
     st.subheader("🤖 Asistente IA Multicuenta Inteligente")
-    st.caption("Escribe de forma natural sobre tus cuentas (Nómina, Naranja, Trade Republic) o inversiones, y la IA lo organizará todo en tu base de datos.")
+    st.caption("Escribe de forma natural sobre tus cuentas o inversiones, y la IA lo organizará.")
     
     api_key = st.secrets.get("GEMINI_API_KEY", "")
     instruccion = st.text_area("Cuéntale a la IA tu estado financiero:", placeholder="Ejemplo: Tengo 1200 euros en la Cuenta Nómina, 8000 euros en la Cuenta Naranja al 1% de TAE, y 5000 euros en Trade Republic al 3.04%...")
@@ -479,12 +466,10 @@ with tab_ia:
                 client = genai.Client(api_key=api_key)
                 
                 prompt_ia = f"""
-                Eres el motor ejecutor y experto financiero de una app con múltiples cuentas. Analiza la petición: '{instruccion}'.
-                El usuario puede querer configurar saldos de sus cuentas específicas ('Cuenta Nómina', 'Cuenta Naranja', 'Trade Republic'), registrar un gasto/ingreso o añadir inversiones/cuentas remuneradas.
-                
+                Eres el motor ejecutor y experto financiero de una app. Analiza la petición: '{instruccion}'.
                 Responde ÚNICAMENTE con un JSON puro (sin bloques de código markdown) con esta estructura:
                 
-                Si actualiza saldos de cuentas corrientes/ahorro principales:
+                Si actualiza saldos de cuentas corrientes principales:
                 {{
                   "accion": "cuentas_banco",
                   "actualizaciones": [
