@@ -56,11 +56,14 @@ def cargar_balance_base():
 
 def actualizar_balance_base(nuevo_monto):
     try:
-        supabase.table("configuracion").upsert(
-            {"clave": "balance_base", "valor": float(nuevo_monto)},
-            on_conflict="clave"
-        ).execute()
-        st.success("Saldo base guardado correctamente.")
+        # 1. Intentamos eliminar el registro anterior si existe
+        supabase.table("configuracion").delete().eq("clave", "balance_base").execute()
+        # 2. Insertamos la nueva fila limpia
+        supabase.table("configuracion").insert({
+            "clave": "balance_base",
+            "valor": float(nuevo_monto)
+        }).execute()
+        st.success("Saldo base actualizado correctamente.")
     except Exception as e:
         st.error(f"Error al actualizar balance base: {e}")
 
