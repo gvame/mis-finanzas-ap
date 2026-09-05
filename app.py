@@ -7,13 +7,12 @@ st.title("💰 Registro Rápido de Gastos")
 if "transacciones" not in st.session_state:
     st.session_state.transacciones = []
 
-# --- FORMULARIO RÁPIDO CON DESPLEGABLES Y BOTONES ---
+# --- FORMULARIO RÁPIDO ---
 st.subheader("⚡ Añadir nuevo movimiento")
 
 col_cat, col_monto = st.columns([2, 1])
 
 with col_cat:
-    # Desplegable simple con las categorías que pides
     categoria = st.selectbox(
         "Categoría:",
         [
@@ -28,21 +27,33 @@ with col_cat:
             "📦 Otros"
         ]
     )
+    
+    # Si selecciona "Otros", se despliega una casilla para escribir el detalle
+    detalle_personalizado = ""
+    if categoria == "📦 Otros":
+        detalle_personalizado = st.text_input("Especifica el concepto para 'Otros':", placeholder="Ej. Reparación coche, regalo...")
 
 with col_monto:
     monto = st.number_input("Importe (€):", min_value=0.0, step=5.0, value=10.0)
 
-# Botón grande de guardar
+# Botón guardar
 if st.button("➕ Guardar Gasto", use_container_width=True):
+    # Definir la etiqueta final del concepto
+    if categoria == "📦 Otros" and detalle_personalizado.strip() != "":
+        categoria_final = f"📦 Otros ({detalle_personalizado.strip()})"
+    else:
+        categoria_final = categoria
+
     tipo = "Ingreso" if "Nómina" in categoria else "Gasto"
+    
     st.session_state.transacciones.append({
-        "Categoría": categoria,
+        "Categoría": categoria_final,
         "Importe (€)": monto,
         "Tipo": tipo
     })
-    st.success(f"¡Guardado! {categoria} por {monto:.2f} €")
+    st.success(f"¡Guardado! {categoria_final} por {monto:.2f} €")
 
-# --- TABLA Y RESUMEN VISUAL ---
+# --- TABLA Y RESUMEN ---
 st.divider()
 st.subheader("📊 Resumen")
 
