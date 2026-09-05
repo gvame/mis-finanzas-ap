@@ -43,12 +43,17 @@ with col2:
 st.divider()
 st.subheader("🤖 Consulta a tu Asesor Financiero IA")
 
-api_key = st.text_input("Introduce tu API Key de Google AI Studio:", type="password")
+# Obtener API Key automáticamente desde Secrets o permitir entrada manual si no existe
+api_key = st.secrets.get("GEMINI_API_KEY", "")
+
+if not api_key:
+    api_key = st.text_input("Introduce tu API Key de Google AI Studio:", type="password")
+
 pregunta = st.text_area("¿Qué duda financiera o de presupuesto tienes hoy?")
 
 if st.button("Consultar IA") and pregunta:
     if not api_key:
-        st.error("Por favor, introduce tu API Key para continuar.")
+        st.error("Por favor, guarda tu API Key en Secrets o introdúcela en el cuadro superior.")
     else:
         try:
             client = genai.Client(api_key=api_key)
