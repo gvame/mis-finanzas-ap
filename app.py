@@ -3,18 +3,59 @@ import pandas as pd
 import yfinance as yf
 import requests
 import json
+import plotly.express as px
+from supabase import create_client, Client
 
+# --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Copiloto Financiero SaaS", page_icon="💰", layout="wide")
-st.title("💰 Copiloto Financiero Inteligente")
 
-# --- CONTROL DE ESTADO (MEMORIA LOCAL / FUTURO SUPABASE) ---
-if "transacciones" not in st.session_state:
-    st.session_state.transacciones = []
+# --- CONEXIÓN A SUPABASE ---
+try:
+    SUPABASE_URL = st.secrets["SUPABASE_URL"]
+    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+except Exception as e:
+    st.error("Error al conectar con Supabase. Revisa tus Secrets en Streamlit Cloud.")
+    st.stop()
 
-if "mis_activos" not in st.session_state:
-    st.session_state.mis_activos = []
+# --- FUNCIONES DE BASE DE DATOS (SUPABASE) ---
+def cargar_balance_base():
+    res = supabase.table("configuracion").select("valor").eq("clave", "balance_base").execute()
+    if res.data:
+        return float(res.data[0]["valor"])
+    return 0.0
 
-# --- FUNCIONES DE SOPORTE Y MERCADO ---
+def actualizar_balance_base(nuevo_monto):
+    res = supabase.table("configuracion").select("*").eq("clave", "balance_base").execute()
+    if res.data:
+        supabase.table("configuracion").update({"valor": float(nuevo_monto)}).eq("clave", "balance_base").execute()
+    else:
+        supabase.table("configuracion").insert({"clave": "balance_base", "valor": float(nuevo_monto)}).execute()
+
+def cargar_transacciones():
+    res = supabase.table("transacciones").select("*").order("id", desc=True).execute()
+    return res.data or []
+
+def cargar_activos():
+    res = supabase.table("activos").select("*").execute()
+    return res.data or []
+
+def registrar_movimiento_db(concepto, monto, tipo):
+    supabase.table("transacciones").insert({
+        "concepto": concepto,
+        "monto": float(monto),
+        "tipo": tipo
+    }).execute()
+
+def agregar_activo_db(ticker, nombre, acciones, precio_compra):
+    supabase.table("activos").insert({
+        "ticker": ticker,
+        "nombre": nombre,
+        "acciones": float(acciones),
+        "precio_compra": float(precio_compra)
+    }).execute()
+
+# --- MERCADO Y COTIZACIONES EN TIEMPO REAL ---
 def buscar_coincidencias(query):
     url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=5&newsCount=0"
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -47,33 +88,68 @@ def obtener_precio_eur(ticker_code):
     except Exception:
         return None
 
-# --- FUNCIONES EJECUTABLES POR LA IA ---
-def registrar_movimiento_ia(concepto, monto, tipo):
-    st.session_state.transacciones.append({
-        "Concepto": concepto,
-        "Importe (€)": float(monto),
-        "Tipo": tipo
-    })
-    return f"Éxito: Se registró el {tipo} '{concepto}' por {monto} €."
+# --- CARGA INICIAL DE DATOS ---
+balance_base = cargar_balance_base()
+transacciones = cargar_transacciones()
+activos = cargar_activos()
 
-def agregar_activo_ia(nombre_empresa, acciones, precio_compra):
-    coincidencias = buscar_coincidencias(nombre_empresa)
-    if coincidencias:
-        elegido = coincidencias[0]
-        st.session_state.mis_activos.append({
-            "Ticker": elegido["symbol"],
-            "Nombre": elegido["name"],
-            "Acciones": float(acciones),
-            "Precio_Compra": float(precio_compra)
-        })
-        return f"Éxito: Se añadió {elegido['name']} ({elegido['symbol']}) al portafolio."
-    return f"Error: No se encontró la empresa '{nombre_empresa}'."
+# --- CÁLCULOS METRICOS PRINCIPALES ---
+total_ingresos = sum(t["monto"] for t in transacciones if t["tipo"] == "Ingreso")
+total_gastos = sum(t["monto"] for t in transacciones if t["tipo"] == "Gasto")
+efectivo_disponible = balance_base + total_ingresos - total_gastos
 
-# --- PESTAÑAS DE LA APLICACIÓN ---
-tab1, tab2, tab3 = st.tabs(["⚡ Gastos / Ingresos", "📈 Portafolio en Tiempo Real", "🤖 Copiloto IA Ejecutor"])
+valor_portafolio_actual = 0.0
+total_invertido = 0.0
 
-with tab1:
-    st.subheader("⚡ Registrar Movimiento Manual")
+for a in activos:
+    inv = a["acciones"] * a["precio_compra"]
+    p_actual = obtener_precio_eur(a["ticker"]) or a["precio_compra"]
+    val = a["acciones"] * p_actual
+    total_invertido += inv
+    valor_portafolio_actual += val
+
+patrimonio_total = efectivo_disponible + valor_portafolio_actual
+
+# --- INTERFAZ / PANEL SUPERIOR ---
+st.title("💰 Copiloto Financiero & Portafolio SaaS")
+
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Patrimonio Total", f"{patrimonio_total:,.2f} €")
+m2.metric("Efectivo Libre", f"{efectivo_disponible:,.2f} €")
+m3.metric("Valor Inversiones", f"{valor_portafolio_actual:,.2f} €")
+ganancia_portafolio = valor_portafolio_actual - total_invertido
+m4.metric("Rendimiento Inversiones", f"{ganancia_portafolio:+,.2f} €")
+
+st.divider()
+
+# --- PESTAÑAS DE NAVEGACIÓN ---
+tab_cuenta, tab_gastos, tab_portafolio, tab_ia = st.tabs([
+    "🏦 Cuenta Base", "⚡ Gastos e Ingresos", "📈 Portafolio & Gráficos", "🤖 Asesor IA Ejecutor"
+])
+
+# ==========================================
+# 1. CUENTA BASE (EFECTIVO INICIAL)
+# ==========================================
+with tab_cuenta:
+    st.subheader("⚙️ Configuración del Balance Base")
+    st.caption("Introduce el saldo de partida inicial en tu cuenta bancaria (sin contar gastos/ingresos posteriores ni inversiones).")
+    
+    col_bal1, col_bal2 = st.columns([2, 1])
+    with col_bal1:
+        nuevo_balance = st.number_input("Saldo Base de la Cuenta (€):", value=balance_base, min_value=0.0, step=100.0)
+    with col_bal2:
+        st.write("")
+        st.write("")
+        if st.button("Actualizar Saldo Base", use_container_width=True):
+            actualizar_balance_base(nuevo_balance)
+            st.success("Saldo base actualizado en Supabase.")
+            st.rerun()
+
+# ==========================================
+# 2. GASTOS E INGRESOS
+# ==========================================
+with tab_gastos:
+    st.subheader("⚡ Registrar Nuevo Movimiento")
     col1, col2 = st.columns([2, 1])
     with col1:
         cat = st.selectbox("Categoría:", ["🍕 Comida", "🛍️ Caprichos", "👕 Ropa", "💡 Luz", "🔥 Gas", "🌐 Internet", "💼 Nómina", "📦 Otros"])
@@ -84,21 +160,30 @@ with tab1:
     if st.button("➕ Guardar Movimiento", use_container_width=True):
         concepto = f"📦 Otros ({det})" if det else cat
         tipo = "Ingreso" if "Nómina" in cat else "Gasto"
-        registrar_movimiento_ia(concepto, monto, tipo)
+        registrar_movimiento_db(concepto, monto, tipo)
         st.success(f"Guardado: {concepto}")
+        st.rerun()
 
-    if st.session_state.transacciones:
-        st.dataframe(pd.DataFrame(st.session_state.transacciones), use_container_width=True)
+    st.divider()
+    st.subheader("📊 Historial de Transacciones")
+    if transacciones:
+        df_trans = pd.DataFrame(transacciones)[["id", "created_at", "concepto", "monto", "tipo"]]
+        st.dataframe(df_trans, use_container_width=True)
+    else:
+        st.info("No hay gastos ni ingresos registrados.")
 
-with tab2:
-    st.subheader("🏢 Buscador de Activos Verificados")
-    busqueda = st.text_input("Buscar empresa:", value="AeroVironment")
+# ==========================================
+# 3. PORTAFOLIO & GRÁFICOS DINÁMICOS
+# ==========================================
+with tab_portafolio:
+    st.subheader("🏢 Buscador y Agregador de Activos")
+    busqueda = st.text_input("Buscar empresa/ETF (ej: AeroVironment, Alphabet, Apple):", value="AeroVironment")
     
     if busqueda:
         opciones = buscar_coincidencias(busqueda)
         if opciones:
             dict_opciones = {f"{item['name']} ({item['symbol']}) - {item['exchange']}": item for item in opciones}
-            seleccion = st.selectbox("Selecciona la empresa:", list(dict_opciones.keys()))
+            seleccion = st.selectbox("Selecciona activo verificado:", list(dict_opciones.keys()))
             activo_elegido = dict_opciones[seleccion]
             
             c_acc, c_prec = st.columns(2)
@@ -108,64 +193,91 @@ with tab2:
                 prec_c = st.number_input("Precio compra medio (€):", min_value=0.0, value=150.0)
                 
             if st.button("Añadir al Portafolio", use_container_width=True):
-                st.session_state.mis_activos.append({
-                    "Ticker": activo_elegido["symbol"],
-                    "Nombre": activo_elegido["name"],
-                    "Acciones": num_acc,
-                    "Precio_Compra": prec_c
-                })
-                st.success(f"Añadido {activo_elegido['name']}.")
+                agregar_activo_db(activo_elegido["symbol"], activo_elegido["name"], num_acc, prec_c)
+                st.success(f"Añadido {activo_elegido['name']} a Supabase.")
+                st.rerun()
 
     st.divider()
-    if st.session_state.mis_activos:
+    st.subheader("💼 Tu Portafolio Valorizado")
+
+    if activos:
         tabla = []
-        for item in st.session_state.mis_activos:
-            p_actual = obtener_precio_eur(item["Ticker"]) or item["Precio_Compra"]
-            inv = item["Acciones"] * item["Precio_Compra"]
-            val = item["Acciones"] * p_actual
+        grafico_data = []
+        
+        for item in activos:
+            p_actual = obtener_precio_eur(item["ticker"]) or item["precio_compra"]
+            inv = item["acciones"] * item["precio_compra"]
+            val = item["acciones"] * p_actual
             gan = val - inv
             pnl = (gan / inv) * 100 if inv > 0 else 0
             
             tabla.append({
-                "Ticker": item["Ticker"],
-                "Empresa": item["Nombre"],
-                "Acciones": item["Acciones"],
-                "Precio Compra (€)": f"{item['Precio_Compra']:.2f}",
-                "Precio Mercado (€)": f"{p_actual:.2f}",
-                "Total Invertido (€)": f"{inv:.2f}",
+                "Ticker": item["ticker"],
+                "Empresa": item["nombre"],
+                "Acciones": item["acciones"],
+                "Precio Compra (€)": f"{item['precio_compra']:.2f}",
+                "Precio Actual (€)": f"{p_actual:.2f}",
+                "Invertido (€)": f"{inv:.2f}",
                 "Valor Actual (€)": f"{val:.2f}",
                 "Rendimiento": f"{gan:+.2f} € ({pnl:+.2f}%)"
             })
+            grafico_data.append({"Empresa": item["nombre"], "Valor (€)": val})
+            
         st.dataframe(pd.DataFrame(tabla), use_container_width=True)
+        
+        # --- GRÁFICOS INTERACTIVOS ---
+        col_g1, col_g2 = st.columns(2)
+        
+        with col_g1:
+            st.markdown("**Distribución de Inversiones**")
+            fig_pie = px.pie(grafico_data, names="Empresa", values="Valor (€)", hole=0.4)
+            st.plotly_chart(fig_pie, use_container_width=True)
+            
+        with col_g2:
+            st.markdown("**Patrimonio: Efectivo vs Inversiones**")
+            df_patrimonio = pd.DataFrame([
+                {"Tipo": "Efectivo Libre", "Monto": efectivo_disponible},
+                {"Tipo": "Inversiones", "Monto": valor_portafolio_actual}
+            ])
+            fig_bar = px.bar(df_patrimonio, x="Tipo", y="Monto", color="Tipo", text_auto=".2f")
+            st.plotly_chart(fig_bar, use_container_width=True)
+    else:
+        st.info("Añade activos desde el buscador para visualizar gráficos en tiempo real.")
 
-with tab3:
+# ==========================================
+# 4. ASESOR IA EJECUTOR
+# ==========================================
+with tab_ia:
     st.subheader("🤖 Pídele a la IA que gestione tu app")
-    st.caption("Ejemplos: 'Apunta un gasto de 30 euros en luz' o 'Añade 2 acciones de Alphabet compradas a 140 euros'.")
+    st.caption("Ejemplos: 'Apunta un gasto de 40 euros en supermercado', 'Añade 2 acciones de Apple a 180 euros' o 'Establece mi saldo base en 3000 euros'.")
     
     api_key = st.secrets.get("GEMINI_API_KEY", "")
     instruccion = st.text_area("Instrucción para la IA:")
     
-    if st.button("Ejecutar Instrucción") and instruccion:
+    if st.button("Ejecutar Instrucción", use_container_width=True) and instruccion:
         if not api_key:
-            st.error("Configura tu API Key en Secrets.")
+            st.error("Configura tu GEMINI_API_KEY en Secrets.")
         else:
             try:
                 from google import genai
                 client = genai.Client(api_key=api_key)
                 
-                # Prompt estructurado para interpretación de comandos
                 prompt_ia = f"""
-                Eres el motor de control de una app financiera.
+                Eres el motor ejecutor de un SaaS financiero.
                 Analiza la petición del usuario: '{instruccion}'.
                 
-                Si quiere registrar un gasto o ingreso, responde ÚNICAMENTE en este formato JSON:
-                {{"accion": "movimiento", "concepto": "nombre_concepto", "monto": numero, "tipo": "Gasto" o "Ingreso"}}
+                Responde ÚNICAMENTE con un objeto JSON sin formato extra según el caso:
+                1. Registro de gasto/ingreso:
+                {{"accion": "movimiento", "concepto": "concepto", "monto": numero, "tipo": "Gasto" o "Ingreso"}}
                 
-                Si quiere añadir un activo/empresa al portafolio, responde ÚNICAMENTE en este formato JSON:
+                2. Añadir inversión:
                 {{"accion": "activo", "empresa": "nombre_empresa", "acciones": numero, "precio_compra": numero}}
                 
-                Si es una consulta normal, responde con formato JSON:
-                {{"accion": "consulta", "respuesta": "tu texto de respuesta"}}
+                3. Cambiar saldo base:
+                {{"accion": "saldo_base", "monto": numero}}
+                
+                4. Consulta normal:
+                {{"accion": "consulta", "respuesta": "texto de respuesta"}}
                 """
                 
                 res = client.models.generate_content(
@@ -173,19 +285,26 @@ with tab3:
                     contents=prompt_ia
                 )
                 
-                # Parsear comando JSON enviado por Gemini
                 texto_limpio = res.text.replace("```json", "").replace("```", "").strip()
                 data = json.loads(texto_limpio)
                 
                 if data.get("accion") == "movimiento":
-                    msg = registrar_movimiento_ia(data["concepto"], data["monto"], data["tipo"])
-                    st.success(msg)
+                    registrar_movimiento_db(data["concepto"], data["monto"], data["tipo"])
+                    st.success(f"IA: Registrado {data['tipo']} de {data['monto']} € en '{data['concepto']}'.")
                 elif data.get("accion") == "activo":
-                    msg = agregar_activo_ia(data["empresa"], data["acciones"], data["precio_compra"])
-                    st.success(msg)
+                    coincidencias = buscar_coincidencias(data["empresa"])
+                    if coincidencias:
+                        elegido = coincidencias[0]
+                        agregar_activo_db(elegido["symbol"], elegido["name"], data["acciones"], data["precio_compra"])
+                        st.success(f"IA: Añadido {elegido['name']} al portafolio.")
+                    else:
+                        st.error(f"IA: No se encontró la empresa {data['empresa']}.")
+                elif data.get("accion") == "saldo_base":
+                    actualizar_balance_base(data["monto"])
+                    st.success(f"IA: Saldo base actualizado a {data['monto']} €.")
                 else:
-                    st.info(data.get("respuesta", "Instrucción procesada."))
+                    st.info(data.get("respuesta"))
                     
                 st.rerun()
             except Exception as e:
-                st.error(f"No se pudo interpretar la orden. Detalle: {e}")
+                st.error(f"Error de ejecución IA: {e}")
