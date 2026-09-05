@@ -62,8 +62,15 @@ def actualizar_balance_base(nuevo_monto):
         supabase.table("configuracion").insert({"clave": "balance_base", "valor": float(nuevo_monto)}).execute()
 
 def cargar_transacciones():
-    res = supabase.table("transacciones").select("*").order("id", desc=True).execute()
-    return res.data or []
+    try:
+        res = supabase.table("transacciones").select("*").order("created_at", desc=True).execute()
+        return res.data or []
+    except Exception:
+        try:
+            res = supabase.table("transacciones").select("*").execute()
+            return res.data or []
+        except Exception:
+            return []
 
 def cargar_activos():
     res = supabase.table("activos").select("*").execute()
